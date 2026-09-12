@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fútbol Arcade — 2 Jugadores</title>
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+<div id="app">
+  <div id="hud">
+    <div class="team-tag p1">
+      <div class="crest">AZU</div>
+      <div class="team-meta">
+        <span class="team-name">Jugador 1</span>
+        <span class="team-sub" id="poss1">Posesión 50%</span>
+      </div>
+    </div>
+
+    <div class="scoreline">
+      <span class="score s1" id="score1">0</span>
+      <div id="mid">
+        <div id="time">03:00</div>
+        <div id="status">¡A jugar!</div>
+      </div>
+      <span class="score s2" id="score2">0</span>
+    </div>
+
+    <div class="team-tag p2 right">
+      <div class="team-meta">
+        <span class="team-name">Jugador 2</span>
+        <span class="team-sub" id="poss2">Posesión 50%</span>
+      </div>
+      <div class="crest">ROJ</div>
+      <div class="hud-btns">
+        <button class="icon-btn" id="sound-btn" title="Sonido">🔊</button>
+        <button class="icon-btn" id="pause-btn" title="Pausa (P)">⏸</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="canvas-wrap">
+    <canvas id="game"></canvas>
+  </div>
+
+  <div id="pad-status">
+    <span class="pad-chip" id="chip1">Mando 1: no conectado (usa WASD)</span>
+    <span class="pad-chip" id="chip2">Mando 2: no conectado (usa flechas)</span>
+  </div>
+</div>
+
+<div id="overlay">
+  <h1>⚽ Fútbol Arcade</h1>
+  <div id="final-score" style="display:none"></div>
+  <p class="tagline">
+    <strong>5 contra 5</strong>: arquero + <strong>2 defensas</strong> y <strong>2 delanteros</strong> por equipo.
+    Controlas a uno a la vez y el resto juega solo — <strong>si tú corres, todo el equipo corre contigo</strong>. El <strong>control siempre va a quien tiene el balón</strong>, y lo lleva pegado al pie sin que se le escape. Con <strong>B</strong> pegas un tiro fuerte al arco y manteniendo <strong>Y</strong> encaras al rival para robársela.
+    Mantén el disparo para cargar un tiro potente y usa el pase para combinar.
+  </p>
+
+  <div class="controls-grid">
+    <div class="controls-col p1">
+      <h3>Jugador Azul</h3>
+      <dl>
+        <dt>Mover</dt><dd>Joystick / <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></dd>
+        <dt>Tiro al arco (mantén)</dt><dd><kbd>A</kbd> mando / <kbd>Espacio</kbd></dd>
+        <dt>Tiro fuerte</dt><dd><kbd>B</kbd> mando / <kbd>F</kbd></dd>
+        <dt>Pase</dt><dd><kbd>X</kbd> mando / <kbd>E</kbd></dd>
+        <dt>Encarar / robar</dt><dd><kbd>Y</kbd> mando / <kbd>R</kbd></dd>
+        <dt>Sprint</dt><dd><kbd>RB</kbd> / <kbd>Shift</kbd></dd>
+        <dt>Cambiar (al más cercano)</dt><dd><kbd>LB</kbd> / <kbd>Q</kbd></dd>
+        <dt>Elegir por dirección</dt><dd>Palanca derecha</dd>
+      </dl>
+    </div>
+    <div class="controls-col p2">
+      <h3>Jugador Rojo</h3>
+      <dl>
+        <dt>Mover</dt><dd>Joystick / <kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd></dd>
+        <dt>Tiro al arco (mantén)</dt><dd><kbd>A</kbd> mando / <kbd>Enter</kbd></dd>
+        <dt>Tiro fuerte</dt><dd><kbd>B</kbd> mando / <kbd>/</kbd></dd>
+        <dt>Pase</dt><dd><kbd>X</kbd> mando / <kbd>.</kbd></dd>
+        <dt>Encarar / robar</dt><dd><kbd>Y</kbd> mando / <kbd>,</kbd></dd>
+        <dt>Sprint</dt><dd><kbd>RB</kbd> / <kbd>Ctrl der.</kbd></dd>
+        <dt>Cambiar (al más cercano)</dt><dd><kbd>LB</kbd> / <kbd>M</kbd></dd>
+        <dt>Elegir por dirección</dt><dd>Palanca derecha</dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="option-row">
+    <span class="option-label">Duración</span>
+    <div class="seg" id="len-seg">
+      <button data-len="120">2 min</button>
+      <button data-len="180" class="active">3 min</button>
+      <button data-len="300">5 min</button>
+    </div>
+  </div>
+
+  <button id="start-btn">Empezar partido</button>
+  <div id="footer-note">Los navegadores detectan los mandos solo después de que presiones un botón en cada uno. Pausa con <kbd>P</kbd> o <kbd>Esc</kbd>.</div>
+</div>
+
+<script src="js/game.js"></script>
+</body>
+</html>
