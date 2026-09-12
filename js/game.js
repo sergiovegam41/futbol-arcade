@@ -212,7 +212,9 @@
 
   const ball = {
     x: W/2, y: H/2, vx:0, vy:0, radius:11,
-    friction:0.986, spin:0, trail:[]
+    friction:0.986, spin:0, trail:[],
+    // a real strike, as opposed to a dribble touch: this is what the keeper reads
+    shotTimer:0, shotSide:null, shotId:0, heldBy:null
   };
 
   /* =========================================================
@@ -283,6 +285,8 @@
     }
     ball.x = W/2; ball.y = H/2; ball.vx = 0; ball.vy = 0; ball.spin = 0;
     ball.trail.length = 0;
+    ball.heldBy = null; ball.shotTimer = 0; ball.shotSide = null;
+    for(const t of teams){ t.gk.state = "idle"; t.gk.stateTimer = 0; t.gk.readShot = -1; }
     lastTouchTeam = towardSide || null;
     ballOwner = null;
   }
@@ -437,6 +441,16 @@
       } catch(e){}
     }
     return false;
+  }
+
+  // Being closed down buzzes the pad of the player ON the ball, throttled so it
+  // reads as steady pressure rather than a machine gun.
+  const rumbleCooldown = [0, 0];
+  function pressureRumble(victimTeam, strength){
+    const i = victimTeam.isP1 ? 0 : 1;
+    if(rumbleCooldown[i] > 0) return;
+    rumbleCooldown[i] = 0.18;
+    rumble(i, strength, strength * 0.85, 150);
   }
 
   const padPrevSwitch = [false, false];
@@ -643,6 +657,11 @@
     ball.vx = Math.cos(ang) * power;
     ball.vy = Math.sin(ang) * power;
     ball.spin = (Math.random() - 0.5) * 0.5 + power * 0.03;
+    // flag it as a genuine shot so goalkeepers only commit to real strikes
+    ball.shotTimer = 1.3;
+    ball.shotSide  = p.side;
+    ball.shotId++;
+    ball.heldBy = null;
     p.kickCooldown = 0.3;
     sfx.kick(Math.min(power / 16, 1));
     spawnParticles(ball.x, ball.y, 10, {
@@ -758,7 +777,15 @@
 
     const owner = ballOwner;
     const theirs = owner && owner.side !== p.side;
-    if(bd < p.radius + ball.radius + CONTAIN_REACH && theirs){
+    const victim = team === team1 ? team2 : team1;
+
+    // the man being closed down feels it building in his pad before contact
+    if(theirs && bd < 190 && !ball.heldBy){
+      const close = 1 - (bd - 40) / 150;
+      pressureRumble(victim, 0.18 + 0.42 * Math.max(0, Math.min(1, close)));
+    }
+
+    if(bd < p.radius + ball.radius + CONTAIN_REACH && theirs && !ball.heldBy){
       // knock it loose, away from the man who had it
       const power = 5.5;
       ball.vx = (bdx/bd) * power;
@@ -770,6 +797,11 @@
         speed: 3.2, life: 0.4, size: 3, color: 'rgba(255,235,170,0.9)'
       });
       flashStatus('¡Robo del equipo ' + team.name + '!');
+      // a sharp jolt for the man robbed, a short one for the man who robbed him
+      rumbleCooldown[victim.isP1 ? 0 : 1] = 0;
+      pressureRumble(victim, 0.95);
+      rumbleCooldown[team.isP1 ? 0 : 1] = 0;
+      pressureRumble(team, 0.45);
       return true;
     }
     return false;
@@ -805,7 +837,7 @@
     if(p.lungeTimer   > 0) p.lungeTimer   -= dt;
     if(team.passCooldown > 0) team.passCooldown -= dt;
 
-    const touching = canTouch(p);
+    const touching = canTouch(p) && !ball.heldBy;
     if(touching) registerTouch(team, p);
 
     // you are carrying the ball if you own it and it is still at your feet
@@ -987,7 +1019,7 @@
       clampToPitch(pl);
 
       // AI ball interaction: shoot near goal, otherwise drive the ball forward
-      if(canTouch(pl)){
+      if(canTouch(pl) && !ball.heldBy){
         registerTouch(team, pl);   // a change of owner hands you the controls
         const goal = opponentGoal(team);
         const distToGoal = Math.hypot(goal.x - pl.x, goal.y - pl.y);
@@ -1013,34 +1045,177 @@
   }
 
   /* =========================================================
-     Goalkeeper AI: idle -> diving -> recovering
+     Goalkeeper AI
+     States: idle -> (shuffle | diving | rushing) -> holding -> recovering
+
+     The old keeper dove at anything moving quickly towards goal, which made it
+     trivial to beat: walk in, wait for the dive, roll it into the empty side.
+     This one only leaves its feet for a genuine SHOT that is genuinely out of
+     reach, and otherwise stays up and shuffles across — so the dive can no
+     longer be baited, and beating it means actually placing the ball.
      ========================================================= */
-  const GK_IDLE_SPEED      = 3.9;
-  const GK_DIVE_SPEED      = 9.0;
-  const GK_DIVE_DURATION   = 0.30;
-  const GK_RECOVER_DURATION= 1.4;
+  const GK_IDLE_SPEED       = 3.6;
+  const GK_SHUFFLE_SPEED    = 5.4;   // fast on-feet sidestep: no recovery cost
+  const GK_DIVE_SPEED       = 9.6;
+  const GK_RUSH_SPEED       = 4.8;   // coming off the line to claim a loose ball
+  const GK_DIVE_DURATION    = 0.30;
+  const GK_RECOVER_DURATION = 1.15;
+  const GK_HOLD_DURATION    = 0.7;   // time spent holding it before distributing
+  const GK_RUSH_RANGE       = 340;   // how far off the line it will come
+  const GK_REACH            = 70;    // lateral gap that actually justifies a dive
+  const GK_DIVE_CHANCE      = 0.88;  // even a good keeper is beaten sometimes
+  const GK_LUNGE_CHANCE     = 0.5;   // per second, when a carrier is right on top of it
+
+  function ownGoalCentre(gk){
+    return { x: gk.side === 'left' ? FIELD_MARGIN : W - FIELD_MARGIN, y: H/2 };
+  }
+
+  // Where the ball will cross the goal line, and how far the keeper must travel
+  // sideways to be there. This is the number the dive decision is made on.
+  function predictAtLine(gk){
+    const lineX = gk.side === 'left' ? FIELD_MARGIN + 26 : W - FIELD_MARGIN - 26;
+    const vx = ball.vx;
+    const closing = gk.side === 'left' ? vx < -0.5 : vx > 0.5;
+    if(!closing) return null;
+    // velocities are per-frame, so this is a count of FRAMES, not seconds
+    const frames = (lineX - ball.x) / vx;
+    if(frames < 0 || frames > 170) return null;      // ~2.8 s away: too early to read
+    // friction scales vx and vy equally, so the straight-line path is exact;
+    // the 0.94 is a deliberate slight under-read to keep the keeper beatable
+    return { y: ball.y + ball.vy * frames * 0.94, frames };
+  }
+
+  function nearestOpponentDist(team, x, y){
+    let best = Infinity;
+    const foes = team === team1 ? team2 : team1;
+    for(const f of foes.outfield){
+      const d = Math.hypot(f.x - x, f.y - y);
+      if(d < best) best = d;
+    }
+    return best;
+  }
+
+  // Throw/roll it to the teammate with the most space, favouring someone who is
+  // ahead of the keeper rather than square with it.
+  function goalkeeperDistribute(team, gk){
+    let best = null, bestScore = -Infinity;
+    const fwd = gk.side === 'left' ? 1 : -1;
+    for(const mate of team.outfield){
+      const space   = nearestOpponentDist(team, mate.x, mate.y);
+      const advance = (mate.x - gk.x) * fwd;
+      const reach   = Math.hypot(mate.x - gk.x, mate.y - gk.y);
+      if(reach < 60) continue;
+      const score = space * 1.0 + advance * 0.35 - Math.max(0, reach - 520) * 0.8;
+      if(score > bestScore){ bestScore = score; best = mate; }
+    }
+    ball.heldBy = null;
+    if(!best){
+      // nobody to aim at: just clear it upfield
+      const dirY = (Math.random() - 0.5) * 1.1;
+      const len  = Math.hypot(fwd, dirY) || 1;
+      ball.vx = (fwd/len) * 11;
+      ball.vy = (dirY/len) * 11;
+    } else {
+      const vx = best.x - gk.x, vy = best.y - gk.y;
+      const d  = Math.hypot(vx, vy) || 1;
+      const power = Math.min(6.5 + d / 75, 14);
+      ball.vx = (vx/d) * power;
+      ball.vy = (vy/d) * power;
+      flashStatus('Saque del arquero ' + team.name);
+    }
+    ball.spin = 0.3;
+    ball.shotTimer = 0;
+    gk.kickCooldown = 0.5;
+    sfx.pass();
+    spawnParticles(ball.x, ball.y, 8, { speed: 2.4, life: 0.35, size: 3 });
+  }
 
   function updateGoalkeeper(team, dt){
     const gk = team.gk;
     const topY = topGoalY + gk.radius + 4;
     const botY = botGoalY - gk.radius - 4;
+    const goal = ownGoalCentre(gk);
 
-    if(gk.state === undefined){ gk.state = 'idle'; gk.stateTimer = 0; gk.diveTarget = null; }
+    if(gk.state === undefined){
+      gk.state = 'idle'; gk.stateTimer = 0; gk.diveTarget = null;
+      gk.readShot = -1; gk.shuffleY = H/2;
+    }
+    if(gk.kickCooldown > 0) gk.kickCooldown -= dt;
 
-    const ballSpeed   = Math.hypot(ball.vx, ball.vy);
-    const towardOwn   = gk.side === 'left' ? ball.vx < -3 : ball.vx > 3;
-    const nearBox     = gk.side === 'left' ? ball.x < FIELD_MARGIN + 300 : ball.x > W - FIELD_MARGIN - 300;
+    const liveShot = ball.shotTimer > 0 && ball.shotSide !== gk.side;
+    const ballFromGoal = Math.hypot(ball.x - goal.x, ball.y - goal.y);
 
-    if(gk.state === 'idle' && ballSpeed > 4.5 && towardOwn && nearBox){
-      const distToLine = gk.side === 'left' ? (ball.x - FIELD_MARGIN) : (W - FIELD_MARGIN - ball.x);
-      const timeToLine = Math.max(distToLine / Math.max(Math.abs(ball.vx), 0.001), 0);
-      let predictedY = ball.y + ball.vy * timeToLine * 0.9;
-      predictedY = Math.max(topY - 34, Math.min(botY + 34, predictedY));
-      gk.diveTarget = { x: gk.home.x + (gk.side === 'left' ? 24 : -24), y: predictedY };
-      gk.state = 'diving';
-      gk.stateTimer = 0;
+    /* ---------- holding: it has the ball, then plays it out ---------- */
+    if(gk.state === 'holding'){
+      gk.stateTimer += dt;
+      ball.heldBy = gk;
+      ball.vx = 0; ball.vy = 0;
+      const fx = gk.side === 'left' ? 1 : -1;
+      ball.x = gk.x + fx * (gk.radius + ball.radius + 2);
+      ball.y = gk.y;
+      // walk back towards the line while holding it
+      const dx = gk.home.x - gk.x, dy = gk.home.y - gk.y;
+      const d = Math.hypot(dx, dy);
+      if(d > 6){ gk.vx = (dx/d) * 2.6; gk.vy = (dy/d) * 2.6; }
+      else { gk.vx = 0; gk.vy = 0; }
+      gk.x += gk.vx * dt * 60;
+      gk.y += gk.vy * dt * 60;
+      clampToPitch(gk);
+      if(gk.stateTimer >= GK_HOLD_DURATION){
+        goalkeeperDistribute(team, gk);
+        gk.state = 'idle'; gk.stateTimer = 0;
+      }
+      return;
     }
 
+    /* ---------- decide, once per shot, whether to leave the feet ---------- */
+    if((gk.state === 'idle' || gk.state === 'shuffle' || gk.state === 'rushing') &&
+       liveShot && ball.shotId !== gk.readShot){
+      const pred = predictAtLine(gk);
+      if(pred){
+        gk.readShot = ball.shotId;
+        const targetY = Math.max(topY - 40, Math.min(botY + 40, pred.y));
+        const gap = Math.abs(targetY - gk.y);
+        // only a shot he cannot simply step across to is worth a dive
+        if(gap > GK_REACH && Math.random() < GK_DIVE_CHANCE){
+          gk.diveTarget = { x: gk.home.x + (gk.side === 'left' ? 26 : -26), y: targetY };
+          gk.state = 'diving';
+          gk.stateTimer = 0;
+        } else {
+          gk.shuffleY = targetY;
+          gk.state = 'shuffle';
+          gk.stateTimer = 0;
+        }
+      }
+    }
+
+    /* ---------- rare desperation lunge when a carrier is on top of it ------- */
+    if(gk.state === 'idle' && !liveShot && ball.heldBy === null &&
+       ballFromGoal < 190 && ballDist(gk) < 120 && gk.kickCooldown <= 0){
+      const owner = ballOwner;
+      // a smother at the ball itself, not a blind dive along the line — so even
+      // when it guesses wrong it is a challenge rather than a free goal
+      if(owner && owner.side !== gk.side && Math.random() < GK_LUNGE_CHANCE * dt){
+        gk.diveTarget = { x: ball.x, y: ball.y };
+        gk.state = 'diving';
+        gk.stateTimer = 0;
+      }
+    }
+
+    /* ---------- come off the line for a loose ball ---------- */
+    if(gk.state === 'idle' && !liveShot && ballFromGoal < GK_RUSH_RANGE){
+      const owner = ballOwner;
+      const mine  = owner && owner.side === gk.side;
+      const gkDist = ballDist(gk);
+      const foeDist = nearestOpponentDist(team, ball.x, ball.y);
+      // only if it is not a teammate's ball and the keeper genuinely gets there first
+      if(!mine && gkDist < foeDist - 25 && gkDist < GK_RUSH_RANGE){
+        gk.state = 'rushing';
+        gk.stateTimer = 0;
+      }
+    }
+
+    /* ---------- movement per state ---------- */
     if(gk.state === 'diving'){
       gk.stateTimer += dt;
       const dx = gk.diveTarget.x - gk.x, dy = gk.diveTarget.y - gk.y;
@@ -1053,19 +1228,51 @@
       if(gk.stateTimer >= GK_DIVE_DURATION || d <= 2){
         gk.state = 'recovering'; gk.stateTimer = 0;
       }
+
     } else if(gk.state === 'recovering'){
       gk.stateTimer += dt;
       gk.vx *= 0.8; gk.vy *= 0.8;
       if(gk.stateTimer >= GK_RECOVER_DURATION){ gk.state = 'idle'; gk.stateTimer = 0; }
-    } else {
-      let targetY = Math.max(topY, Math.min(botY, ball.y));
-      const ownGoalNear = gk.side === 'left' ? (ball.x < halfW * 0.55) : (ball.x > W - halfW * 0.55);
-      const targetX = gk.home.x + (ownGoalNear ? (gk.side === 'left' ? 20 : -20) : 0);
+
+    } else if(gk.state === 'shuffle'){
+      // stays on its feet and steps across: quick, and with no recovery penalty
+      gk.stateTimer += dt;
+      const targetY = Math.max(topY, Math.min(botY, gk.shuffleY));
+      const targetX = gk.home.x + (gk.side === 'left' ? 22 : -22);
       const dx = targetX - gk.x, dy = targetY - gk.y;
       const d = Math.hypot(dx, dy);
       if(d > 2){
-        gk.vx = (dx/d) * GK_IDLE_SPEED;
-        gk.vy = (dy/d) * GK_IDLE_SPEED;
+        gk.vx = (dx/d) * GK_SHUFFLE_SPEED;
+        gk.vy = (dy/d) * GK_SHUFFLE_SPEED;
+        gk.facing.x = dx/d; gk.facing.y = dy/d;
+      } else { gk.vx = 0; gk.vy = 0; }
+      if(!liveShot || gk.stateTimer > 1.6){ gk.state = 'idle'; gk.stateTimer = 0; }
+
+    } else if(gk.state === 'rushing'){
+      gk.stateTimer += dt;
+      const dx = ball.x - gk.x, dy = ball.y - gk.y;
+      const d = Math.hypot(dx, dy) || 1;
+      gk.vx = (dx/d) * GK_RUSH_SPEED;
+      gk.vy = (dy/d) * GK_RUSH_SPEED;
+      gk.facing.x = dx/d; gk.facing.y = dy/d;
+      const foeDist = nearestOpponentDist(team, ball.x, ball.y);
+      const owner = ballOwner;
+      // give up if it was a bad idea after all
+      if(gk.stateTimer > 2.2 || ballFromGoal > GK_RUSH_RANGE + 90 ||
+         foeDist < d - 30 || (owner && owner.side === gk.side) || liveShot){
+        gk.state = 'idle'; gk.stateTimer = 0;
+      }
+
+    } else { // idle: hold the line, tracking the ball across the mouth
+      const shrink = Math.max(0, Math.min(1, (520 - ballFromGoal) / 520));
+      let targetY = Math.max(topY, Math.min(botY, H/2 + (ball.y - H/2) * (0.55 + 0.45*shrink)));
+      const targetX = gk.home.x + (gk.side === 'left' ? 1 : -1) * (8 + 22 * shrink);
+      const dx = targetX - gk.x, dy = targetY - gk.y;
+      const d = Math.hypot(dx, dy);
+      if(d > 2){
+        const spd = GK_IDLE_SPEED * (1 + shrink * 0.55);
+        gk.vx = (dx/d) * spd;
+        gk.vy = (dy/d) * spd;
         gk.facing.x = dx/d; gk.facing.y = dy/d;
       } else { gk.vx = 0; gk.vy = 0; }
     }
@@ -1074,30 +1281,52 @@
     gk.y += gk.vy * dt * 60;
     clampToPitch(gk);
 
-    if(gk.kickCooldown > 0) gk.kickCooldown -= dt;
-
+    /* ---------- contact with the ball ---------- */
     const inBox = gk.side === 'left'
       ? ball.x < FIELD_MARGIN + PENALTY_BOX_DEPTH + 20
       : ball.x > W - FIELD_MARGIN - PENALTY_BOX_DEPTH - 20;
 
-    if(ballDist(gk) < gk.radius + ball.radius + 8){
+    if(ballDist(gk) < gk.radius + ball.radius + 8 && gk.kickCooldown <= 0){
       registerTouch(team, gk);
-      if(inBox && gk.kickCooldown <= 0){
-        const dirX = gk.side === 'left' ? 1 : -1;
-        const dirY = (Math.random() - 0.5) * 1.2;
-        const len  = Math.hypot(dirX, dirY) || 1;
-        ball.vx = (dirX/len) * 10.5;
-        ball.vy = (dirY/len) * 10.5;
-        gk.kickCooldown = 0.6;
+      const wasShot = liveShot;
+      if(inBox){
+        // inside the area it can pick the ball up and play it out properly
+        gk.state = 'holding';
+        gk.stateTimer = 0;
+        ball.heldBy = gk;
+        ball.vx = 0; ball.vy = 0;
+        ball.shotTimer = 0;
         sfx.save();
-        spawnParticles(ball.x, ball.y, 12, { speed: 3, life: 0.45, size: 3, color: 'rgba(255,255,255,0.8)' });
-        if(gk.state === 'diving'){ gk.state = 'recovering'; gk.stateTimer = 0; }
-        flashStatus('¡Atajada del arquero ' + team.name + '!');
+        spawnParticles(ball.x, ball.y, 14, {
+          speed: 3, life: 0.45, size: 3, color: 'rgba(255,255,255,0.85)'
+        });
+        if(wasShot) flashStatus('¡Atajada del arquero ' + team.name + '!');
       } else {
-        const pdx = ball.x - gk.x, pdy = ball.y - gk.y;
-        const plen = Math.hypot(pdx, pdy) || 1;
-        ball.vx += (pdx/plen) * 0.3;
-        ball.vy += (pdy/plen) * 0.3;
+        // outside the area it cannot handle it, so it plays it away with its
+        // feet — still aimed at a teammate where there is one, just less precise
+        let target = null, bestScore = -Infinity;
+        const fwd = gk.side === 'left' ? 1 : -1;
+        for(const mate of team.outfield){
+          const reach = Math.hypot(mate.x - gk.x, mate.y - gk.y);
+          if(reach < 80 || reach > 700) continue;
+          const score = nearestOpponentDist(team, mate.x, mate.y) + (mate.x - gk.x) * fwd * 0.3;
+          if(score > bestScore){ bestScore = score; target = mate; }
+        }
+        let ax, ay;
+        if(target){
+          ax = target.x - gk.x; ay = target.y - gk.y;
+        } else {
+          ax = fwd; ay = (Math.random() - 0.5) * 1.2;
+        }
+        const alen = Math.hypot(ax, ay) || 1;
+        const jitter = (Math.random() - 0.5) * 0.25;    // hurried clearance
+        const ang = Math.atan2(ay/alen, ax/alen) + jitter;
+        ball.vx = Math.cos(ang) * 12;
+        ball.vy = Math.sin(ang) * 12;
+        ball.shotTimer = 0;
+        gk.kickCooldown = 0.5;
+        sfx.kick(0.7);
+        if(gk.state === 'rushing'){ gk.state = 'idle'; gk.stateTimer = 0; }
       }
     }
   }
@@ -1125,6 +1354,8 @@
   }
 
   function updateBall(dt){
+    if(ball.shotTimer > 0) ball.shotTimer -= dt;
+    if(ball.heldBy){ ball.trail.length = 0; return; }   // in the keeper's hands
     ball.x += ball.vx * dt * 60;
     ball.y += ball.vy * dt * 60;
     ball.vx *= ball.friction;
@@ -1297,6 +1528,17 @@
   /* =========================================================
      Drawing — players
      ========================================================= */
+  // what the keeper shows on its shirt, so its state is readable at a glance
+  function gkGlyph(p){
+    switch(p.state){
+      case 'recovering': return '···';
+      case 'holding':    return '●';   // has the ball in its hands
+      case 'rushing':    return '»';
+      case 'diving':     return '';
+      default:           return String(p.number);
+    }
+  }
+
   function drawPlayer(p, isControlled, team){
     const speed = Math.hypot(p.vx, p.vy);
     p.runPhase += speed * 0.09;
@@ -1384,7 +1626,7 @@
     ctx.font = 'bold ' + (isGK ? 12 : 13) + 'px "Segoe UI", sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(isGK && p.state === 'recovering' ? '···' : String(p.number), 0, 1);
+    ctx.fillText(isGK ? gkGlyph(p) : String(p.number), 0, 1);
 
     // facing wedge
     const fx = p.facing.x || (p.side === 'left' ? 1 : -1);
@@ -1595,6 +1837,8 @@
 
     tickSwitchTimers(team1, dt);
     tickSwitchTimers(team2, dt);
+    if(rumbleCooldown[0] > 0) rumbleCooldown[0] -= dt;
+    if(rumbleCooldown[1] > 0) rumbleCooldown[1] -= dt;
 
     teams.forEach(t => {
       t.sprintInput = false;
