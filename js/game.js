@@ -405,6 +405,40 @@
     };
   }
 
+  /* ---------- Rumble ----------
+     Controller haptics. The modern path is vibrationActuator.playEffect; older
+     builds only expose hapticActuators[].pulse, so both are handled and a pad
+     with neither simply does nothing. */
+  let rumbleOn = true;
+  const clamp01 = v => Math.max(0, Math.min(1, v));
+
+  function rumble(padIndex, strong, weak, duration){
+    if(!rumbleOn) return false;
+    const gp = getGamepads()[padIndex];
+    if(!gp) return false;
+    const ms = Math.round(duration);
+    const act = gp.vibrationActuator;
+    if(act && typeof act.playEffect === 'function'){
+      try {
+        const r = act.playEffect('dual-rumble', {
+          startDelay: 0,
+          duration: ms,
+          strongMagnitude: clamp01(strong),
+          weakMagnitude:   clamp01(weak)
+        });
+        if(r && typeof r.catch === 'function') r.catch(() => {});
+        return true;
+      } catch(e){ /* fall through to the legacy path */ }
+    }
+    if(gp.hapticActuators && gp.hapticActuators.length){
+      try {
+        const a = gp.hapticActuators[0];
+        if(typeof a.pulse === 'function'){ a.pulse(clamp01(strong), ms); return true; }
+      } catch(e){}
+    }
+    return false;
+  }
+
   const padPrevSwitch = [false, false];
   const padPrevRStick = [false, false];
   function pollGamepadSwitch(){
@@ -670,6 +704,26 @@
   const MIN_SHOT    = 9.0;
   const POWER_SHOT  = 22.0;   // the B-button hammer
 
+  // ---- shot rumble -------------------------------------------------------
+  // Kicks near the opponent's goal kick back through the pad. The closer to
+  // goal and the harder the strike, the stronger and longer the jolt; shots
+  // from outside RUMBLE_RANGE do nothing, so it stays a "this one matters" cue
+  // rather than buzzing on every touch.
+  const RUMBLE_RANGE = 560;   // px from goal where a shot starts to rumble
+  const RUMBLE_PEAK  = 130;   // px from goal at which it is at full strength
+
+  function shotRumble(team, p, power){
+    const goal = opponentGoal(team);
+    const d = Math.hypot(goal.x - p.x, goal.y - p.y);
+    if(d > RUMBLE_RANGE) return false;
+
+    const near  = clamp01((RUMBLE_RANGE - d) / (RUMBLE_RANGE - RUMBLE_PEAK));
+    const hit   = clamp01((power - MIN_SHOT) / (POWER_SHOT - MIN_SHOT));
+    const mix   = near * 0.7 + hit * 0.3;
+    const strong = 0.30 + 0.70 * mix;
+    return rumble(team.isP1 ? 0 : 1, strong, strong * 0.55, 110 + 150 * mix);
+  }
+
   // ---- close control ----------------------------------------------------
   // While you have the ball it is carried at a fixed point just ahead of your
   // feet instead of being nudged with impulses, so it cannot squirt away on its
@@ -770,6 +824,7 @@
     if(input.power && !team.powerHeld && (carrying || touching) && p.kickCooldown <= 0){
       aimAtGoal(p, team, 0.75);          // this one really wants the goal
       shoot(p, POWER_SHOT, 0.02);
+      shotRumble(team, p, POWER_SHOT);
       shake = Math.max(shake, 7);
       team.charge = 0;
       team.chargeHeld = false;
@@ -789,6 +844,7 @@
         // the harder you hit it, the more it counts as a shot on goal
         aimAtGoal(p, team, 0.30 + 0.32 * team.charge);
         shoot(p, power, 0.04);
+        shotRumble(team, p, power);
       } else {
         p.lungeTimer = 0.22;   // no ball nearby: burst forward as a tackle/lunge
       }
