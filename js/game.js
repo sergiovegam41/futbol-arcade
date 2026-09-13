@@ -170,11 +170,12 @@
     return {
       x: home.x, y: home.y, vx:0, vy:0,
       color, side, role, slot, number,
-      radius: role === 'GK' ? 20 : 18,
+      radius: role === 'GK' ? 16 : 18,
       speed:  role === 'GK' ? 2.6 : 2.95,
       sprintMult: 1.62,
       kickCooldown: 0,
       lungeTimer: 0,
+      beatenTimer: 0,
       runPhase: Math.random() * 6.28,
       home,
       facing: { x: side === 'left' ? 1 : -1, y: 0 }
@@ -190,6 +191,8 @@
       claimHold: 0,
       switchCursor: 0,
       chainTimer: 0,
+      powerup: null,
+      chargeKind: null,
       containing: false,
       powerHeld: false,
       advance: 0,        // smoothed team-wide push forward(+) / drop back(-)
@@ -214,12 +217,119 @@
     x: W/2, y: H/2, vx:0, vy:0, radius:11,
     friction:0.986, spin:0, trail:[],
     // a real strike, as opposed to a dribble touch: this is what the keeper reads
-    shotTimer:0, shotSide:null, shotId:0, heldBy:null
+    shotTimer:0, shotSide:null, shotId:0, heldBy:null, shotPower:0, shotSweet:false, shotFire:false
   };
 
   /* =========================================================
      Particles (grass, sparks, confetti)
      ========================================================= */
+  /* =========================================================
+     Power-ups
+     Rare pickups that drop on the pitch. Deliberately scarce: one on the
+     grass at a time and a hard cap per match, so they stay a moment rather
+     than a mechanic you can farm.
+     ========================================================= */
+  const PU_MAX_ON_PITCH   = 1;
+  const PU_MAX_PER_MATCH  = 3;
+  const PU_FIRST_DELAY    = 35;   // s before the first one can appear
+  const PU_INTERVAL_MIN   = 30;   // s between attempts afterwards
+  const PU_INTERVAL_MAX   = 55;
+  const PU_LIFETIME       = 14;   // s it waits on the pitch before fading
+
+  const powerups = [];
+  let puSpawned = 0;
+  let puTimer   = PU_FIRST_DELAY;
+
+  function resetPowerups(){
+    powerups.length = 0;
+    puSpawned = 0;
+    puTimer = PU_FIRST_DELAY;
+    for(const t of teams){ t.powerup = null; }
+  }
+
+  function updatePowerups(dt){
+    puTimer -= dt;
+    if(puTimer <= 0 && powerups.length < PU_MAX_ON_PITCH && puSpawned < PU_MAX_PER_MATCH){
+      // drop it around the middle third so neither side simply owns it
+      powerups.push({
+        kind: 'fire',
+        x: W/2 + (Math.random() - 0.5) * (W * 0.38),
+        y: FIELD_MARGIN + 90 + Math.random() * (H - FIELD_MARGIN*2 - 180),
+        life: PU_LIFETIME,
+        phase: Math.random() * 6.28,
+        radius: 21
+      });
+      puSpawned++;
+      puTimer = PU_INTERVAL_MIN + Math.random() * (PU_INTERVAL_MAX - PU_INTERVAL_MIN);
+      flashStatus('¡Apareció un poder en el campo!');
+    }
+
+    for(let i = powerups.length - 1; i >= 0; i--){
+      const pu = powerups[i];
+      pu.life -= dt;
+      pu.phase += dt * 3;
+      if(pu.life <= 0){ powerups.splice(i, 1); continue; }
+      if(Math.random() < 0.5){
+        spawnParticles(pu.x + (Math.random()-0.5)*16, pu.y + 6, 1, {
+          angle: -Math.PI/2, spread: 0.8, speed: 1.1, life: 0.5, size: 3,
+          color: Math.random() < 0.5 ? 'rgba(255,170,60,0.9)' : 'rgba(255,90,40,0.85)'
+        });
+      }
+      // first player to reach it takes it for their team
+      for(const team of teams){
+        for(const pl of team.outfield){
+          if(Math.hypot(pl.x - pu.x, pl.y - pu.y) < pl.radius + pu.radius){
+            team.powerup = pu.kind;
+            powerups.splice(i, 1);
+            sfx.goal();
+            shake = Math.max(shake, 8);
+            spawnParticles(pu.x, pu.y, 26, {
+              speed: 4, life: 0.7, size: 4, gravity: 0.03,
+              color: 'rgba(255,150,50,0.95)'
+            });
+            flashStatus('¡' + team.name + ' tiene TIRO DE FUEGO!');
+            return;
+          }
+        }
+      }
+    }
+  }
+
+  function drawPowerups(){
+    for(const pu of powerups){
+      const pulse = 1 + Math.sin(pu.phase) * 0.12;
+      const fade  = pu.life < 3 ? (0.35 + 0.65 * Math.abs(Math.sin(pu.life * 8))) : 1;
+      ctx.save();
+      ctx.globalAlpha = fade;
+      ctx.translate(pu.x, pu.y);
+
+      const g = ctx.createRadialGradient(0, 0, 2, 0, 0, pu.radius * 1.5 * pulse);
+      g.addColorStop(0, 'rgba(255,240,190,0.95)');
+      g.addColorStop(0.45, 'rgba(255,150,40,0.75)');
+      g.addColorStop(1, 'rgba(255,60,10,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(0, 0, pu.radius * 1.5 * pulse, 0, Math.PI*2);
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(0, 0, pu.radius * 0.62 * pulse, 0, Math.PI*2);
+      ctx.fillStyle = '#ffcf66';
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(255,90,30,0.9)';
+      ctx.stroke();
+
+      ctx.font = 'bold 15px "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#7a2800';
+      ctx.fillText('🔥', 0, 1);
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+  }
+
   const particles = [];
   function spawnParticles(x, y, count, opts){
     const o = opts || {};
@@ -648,22 +758,38 @@
     if(bs > cap){ ball.vx = ball.vx/bs*cap; ball.vy = ball.vy/bs*cap; }
   }
 
+  function teamOf(p){ return p.side === team1.side ? team1 : team2; }
+
   function shoot(p, power, spread){
+    // a stored fire shot is spent here, whoever on the team takes the strike
+    const tm = teamOf(p);
+    let pw = power, sp = spread;
+    const fire = tm.powerup === 'fire';
+    if(fire){
+      tm.powerup = null;
+      pw = power * 1.35;
+      sp = (spread || 0) * 0.3;
+      shake = Math.max(shake, 14);
+      flashStatus('🔥 ¡TIRO DE FUEGO!');
+    }
     const kdx = p.facing.x || (p.side === 'left' ? 1 : -1);
     const kdy = p.facing.y;
     const klen = Math.hypot(kdx, kdy) || 1;
-    const jitter = (Math.random() - 0.5) * (spread || 0);
+    const jitter = (Math.random() - 0.5) * (sp || 0);
     const ang = Math.atan2(kdy/klen, kdx/klen) + jitter;
-    ball.vx = Math.cos(ang) * power;
-    ball.vy = Math.sin(ang) * power;
-    ball.spin = (Math.random() - 0.5) * 0.5 + power * 0.03;
+    ball.vx = Math.cos(ang) * pw;
+    ball.vy = Math.sin(ang) * pw;
+    ball.spin = (Math.random() - 0.5) * 0.5 + pw * 0.03;
     // flag it as a genuine shot so goalkeepers only commit to real strikes
     ball.shotTimer = 1.3;
     ball.shotSide  = p.side;
+    ball.shotPower = pw;
+    ball.shotSweet = false;
+    ball.shotFire  = fire;
     ball.shotId++;
     ball.heldBy = null;
     p.kickCooldown = 0.3;
-    sfx.kick(Math.min(power / 16, 1));
+    sfx.kick(Math.min(pw / 16, 1));
     spawnParticles(ball.x, ball.y, 10, {
       angle: ang + Math.PI, spread: 1.3, speed: 3, life: 0.35, size: 3,
       color: 'rgba(220,245,220,0.85)'
@@ -721,7 +847,14 @@
   const CHARGE_TIME = 0.62;
   const MAX_SHOT    = 17.5;
   const MIN_SHOT    = 9.0;
-  const POWER_SHOT  = 22.0;   // the B-button hammer
+  // B is a charged hammer: the bar fills slower, and there is an ideal band
+  // in the middle of it. Struck inside that band the ball is accurate AND the
+  // hardest for a keeper to hold; past it you get more pace but less control.
+  const POWER_TIME  = 0.95;   // seconds to fill the B bar
+  const POWER_MIN   = 11.0;
+  const POWER_MAX   = 24.0;
+  const SWEET_MIN   = 0.70;   // ideal band, as a fraction of the bar
+  const SWEET_MAX   = 0.90;
 
   // ---- shot rumble -------------------------------------------------------
   // Kicks near the opponent's goal kick back through the pad. The closer to
@@ -731,13 +864,24 @@
   const RUMBLE_RANGE = 560;   // px from goal where a shot starts to rumble
   const RUMBLE_PEAK  = 130;   // px from goal at which it is at full strength
 
+  // Kicks near the box also kick the CAMERA, so a shot on goal lands even
+  // without a controller attached.
+  function shotShake(team, p, power){
+    const goal = opponentGoal(team);
+    const d = Math.hypot(goal.x - p.x, goal.y - p.y);
+    if(d > RUMBLE_RANGE) return;
+    const near = clamp01((RUMBLE_RANGE - d) / (RUMBLE_RANGE - RUMBLE_PEAK));
+    const hit  = clamp01((power - MIN_SHOT) / (POWER_MAX - MIN_SHOT));
+    shake = Math.max(shake, 4 + 11 * (near * 0.65 + hit * 0.35));
+  }
+
   function shotRumble(team, p, power){
     const goal = opponentGoal(team);
     const d = Math.hypot(goal.x - p.x, goal.y - p.y);
     if(d > RUMBLE_RANGE) return false;
 
     const near  = clamp01((RUMBLE_RANGE - d) / (RUMBLE_RANGE - RUMBLE_PEAK));
-    const hit   = clamp01((power - MIN_SHOT) / (POWER_SHOT - MIN_SHOT));
+    const hit   = clamp01((power - MIN_SHOT) / (POWER_MAX - MIN_SHOT));
     const mix   = near * 0.7 + hit * 0.3;
     const strong = 0.30 + 0.70 * mix;
     return rumble(team.isP1 ? 0 : 1, strong, strong * 0.55, 110 + 150 * mix);
@@ -852,36 +996,62 @@
       team.containing = false;
     }
 
-    // ----- hard shot on goal (B) -----
-    if(input.power && !team.powerHeld && (carrying || touching) && p.kickCooldown <= 0){
-      aimAtGoal(p, team, 0.75);          // this one really wants the goal
-      shoot(p, POWER_SHOT, 0.02);
-      shotRumble(team, p, POWER_SHOT);
-      shake = Math.max(shake, 7);
+    // ----- shooting: B fills a power bar, A is the placed shot -----
+    // B takes priority so holding both does not fight over the same meter.
+    const wantPower  = !!input.power;
+    const wantPlaced = !!input.kick && !wantPower;
+    const canStrike  = carrying || (touching && p.kickCooldown <= 0);
+
+    if(wantPower){
+      team.charge = Math.min(team.charge + dt / POWER_TIME, 1);
+      team.chargeKind = 'power';
+      team.chargeHeld = true;
+      team.powerHeld  = true;
+      if(carrying) carryBall(p, false);          // glued while winding up
+
+    } else if(team.powerHeld){
+      const c = team.charge;
+      if(canStrike){
+        const power   = POWER_MIN + (POWER_MAX - POWER_MIN) * c;
+        const sweet   = c >= SWEET_MIN && c <= SWEET_MAX;
+        // past the sweet spot you are leaning back on it: more power, less control
+        const overhit = Math.max(0, c - SWEET_MAX) / (1 - SWEET_MAX);
+        const spread  = sweet ? 0.015 : 0.055 + overhit * 0.11;
+        aimAtGoal(p, team, sweet ? 0.80 : 0.55);
+        shoot(p, power, spread);
+        ball.shotSweet = sweet;
+        shotRumble(team, p, power);
+        shotShake(team, p, power);
+        if(sweet) flashStatus('¡Golpeo perfecto!');
+      } else {
+        p.lungeTimer = 0.22;
+      }
       team.charge = 0;
       team.chargeHeld = false;
-      team.powerHeld = true;
-      return;
-    }
-    team.powerHeld = !!input.power;
+      team.powerHeld  = false;
+      team.chargeKind = null;
 
-    // ----- charged shot (A) -----
-    if(input.kick){
+    } else if(wantPlaced){
       team.charge = Math.min(team.charge + dt / CHARGE_TIME, 1);
+      team.chargeKind = 'placed';
       team.chargeHeld = true;
-      if(carrying) carryBall(p, false);   // keep it glued while winding up
+      if(carrying) carryBall(p, false);
+
     } else if(team.chargeHeld){
       const power = MIN_SHOT + (MAX_SHOT - MIN_SHOT) * team.charge;
-      if(carrying || (touching && p.kickCooldown <= 0)){
+      if(canStrike){
         // the harder you hit it, the more it counts as a shot on goal
         aimAtGoal(p, team, 0.30 + 0.32 * team.charge);
         shoot(p, power, 0.04);
         shotRumble(team, p, power);
+        shotShake(team, p, power);
       } else {
         p.lungeTimer = 0.22;   // no ball nearby: burst forward as a tackle/lunge
       }
       team.charge = 0;
       team.chargeHeld = false;
+      team.chargeKind = null;
+
     } else if(carrying && !stole){
       carryBall(p, sprinting);            // close control: the ball stays on your feet
     } else if(touching && p.kickCooldown <= 0 && !stole){
@@ -1054,10 +1224,10 @@
      reach, and otherwise stays up and shuffles across — so the dive can no
      longer be baited, and beating it means actually placing the ball.
      ========================================================= */
-  const GK_IDLE_SPEED       = 3.6;
-  const GK_SHUFFLE_SPEED    = 5.4;   // fast on-feet sidestep: no recovery cost
-  const GK_DIVE_SPEED       = 9.6;
-  const GK_RUSH_SPEED       = 4.8;   // coming off the line to claim a loose ball
+  const GK_IDLE_SPEED       = 2.9;
+  const GK_SHUFFLE_SPEED    = 4.3;   // fast on-feet sidestep: no recovery cost
+  const GK_DIVE_SPEED       = 8.4;
+  const GK_RUSH_SPEED       = 4.1;   // coming off the line to claim a loose ball
   const GK_DIVE_DURATION    = 0.30;
   const GK_RECOVER_DURATION = 1.15;
   const GK_HOLD_DURATION    = 0.7;   // time spent holding it before distributing
@@ -1130,6 +1300,44 @@
     spawnParticles(ball.x, ball.y, 8, { speed: 2.4, life: 0.35, size: 3 });
   }
 
+  // How likely the ball is to get past a keeper who reaches it. Pure power
+  // helps, a clean strike (the sweet spot on the B bar) helps more, and a fire
+  // shot is very hard to stop. Nothing here models hands or legs — the keeper
+  // simply fades out for a moment and the ball goes through.
+  const BEAT_CAP = 0.78;
+  function keeperBeatChance(){
+    if(ball.shotFire) return 0.90;
+    const n = clamp01((ball.shotPower - MIN_SHOT) / (POWER_MAX - MIN_SHOT));
+    let c = 0.10 + 0.40 * n;
+    if(ball.shotSweet) c += 0.18;
+    return Math.min(c, BEAT_CAP);
+  }
+
+  const BEATEN_FLAVOURS = [
+    'Se le escapa de las manos',
+    'Se le cuela por debajo',
+    'Le pasa por encima',
+    'No la puede sujetar'
+  ];
+
+  function keeperBeaten(team, gk){
+    // push the ball just past him so it does not re-collide next frame
+    const sp = Math.hypot(ball.vx, ball.vy) || 1;
+    ball.x += (ball.vx / sp) * (gk.radius + ball.radius + 6);
+    ball.y += (ball.vy / sp) * (gk.radius + ball.radius + 6);
+    ball.vx *= 0.78;
+    ball.vy *= 0.78;
+    gk.beatenTimer = 0.85;          // drawn faded while this runs
+    gk.kickCooldown = 0.55;         // cannot grab it again on the way through
+    gk.state = 'recovering';
+    gk.stateTimer = 0;
+    sfx.wall();
+    spawnParticles(ball.x, ball.y, 14, {
+      speed: 2.6, life: 0.45, size: 3, color: 'rgba(255,255,255,0.7)'
+    });
+    flashStatus(BEATEN_FLAVOURS[Math.floor(Math.random() * BEATEN_FLAVOURS.length)] + '…');
+  }
+
   function updateGoalkeeper(team, dt){
     const gk = team.gk;
     const topY = topGoalY + gk.radius + 4;
@@ -1141,6 +1349,7 @@
       gk.readShot = -1; gk.shuffleY = H/2;
     }
     if(gk.kickCooldown > 0) gk.kickCooldown -= dt;
+    if(gk.beatenTimer > 0) gk.beatenTimer -= dt;
 
     const liveShot = ball.shotTimer > 0 && ball.shotSide !== gk.side;
     const ballFromGoal = Math.hypot(ball.x - goal.x, ball.y - goal.y);
@@ -1287,8 +1496,17 @@
       : ball.x > W - FIELD_MARGIN - PENALTY_BOX_DEPTH - 20;
 
     if(ballDist(gk) < gk.radius + ball.radius + 8 && gk.kickCooldown <= 0){
-      registerTouch(team, gk);
       const wasShot = liveShot;
+
+      // A keeper getting a hand to it is not the same as holding it. The harder
+      // and cleaner the strike, the likelier it squirms through — so shooting
+      // straight at him is no longer an automatic save.
+      if(wasShot && Math.random() < keeperBeatChance()){
+        keeperBeaten(team, gk);
+        return;
+      }
+
+      registerTouch(team, gk);
       if(inBox){
         // inside the area it can pick the ball up and play it out properly
         gk.state = 'holding';
@@ -1365,6 +1583,12 @@
     ball.spin += speed * 0.035;
     if(speed < 0.03){ ball.vx = 0; ball.vy = 0; }
 
+    if(ball.shotFire && ball.shotTimer > 0 && speed > 2){
+      spawnParticles(ball.x, ball.y, 2, {
+        speed: 1.3, life: 0.42, size: 5,
+        color: Math.random() < 0.5 ? 'rgba(255,170,50,0.95)' : 'rgba(255,70,20,0.9)'
+      });
+    }
     // trail for fast shots
     if(speed > 6){
       ball.trail.push({ x: ball.x, y: ball.y, life: 0.25 });
@@ -1402,12 +1626,16 @@
   /* =========================================================
      Drawing — pitch
      ========================================================= */
-  let fieldCache = null;
+  let fieldCache = null, fieldCacheKey = '';
 
   function buildFieldCache(){
+    // Built at the REAL pixel size of the canvas, not at 1600x900, so the
+    // pitch lines are drawn crisp instead of being resampled when scaled up.
     const off = document.createElement('canvas');
-    off.width = W; off.height = H;
+    off.width  = Math.max(1, canvas.width);
+    off.height = Math.max(1, canvas.height);
     const c = off.getContext('2d');
+    c.setTransform(off.width / W, 0, 0, off.height / H, 0, 0);
 
     // outside the touchline
     const outer = c.createLinearGradient(0, 0, 0, H);
@@ -1468,12 +1696,20 @@
       const spotX = gx + dir * (PENALTY_BOX_DEPTH - 46);
       c.fillStyle = 'rgba(240,250,240,0.85)';
       c.beginPath(); c.arc(spotX, H/2, 4, 0, Math.PI*2); c.fill();
-      // D arc
-      c.beginPath();
-      c.arc(spotX, H/2, 72,
-            side === 'left' ? -Math.PI/2.6 : Math.PI - Math.PI/2.6,
-            side === 'left' ?  Math.PI/2.6 : Math.PI + Math.PI/2.6);
-      c.stroke();
+      // D arc — only the part that pokes OUT of the penalty box. The angle is
+      // derived from where the circle actually crosses the box line, so the two
+      // meet exactly instead of the arc cutting a chord through the box.
+      const arcR   = 84;
+      const edgeX  = side === 'left' ? gx + PENALTY_BOX_DEPTH : gx - PENALTY_BOX_DEPTH;
+      const reach  = Math.abs(edgeX - spotX);
+      if(reach < arcR){
+        const half = Math.acos(reach / arcR);
+        c.beginPath();
+        c.arc(spotX, H/2, arcR,
+              side === 'left' ? -half : Math.PI - half,
+              side === 'left' ?  half : Math.PI + half);
+        c.stroke();
+      }
     });
 
     // corner arcs
@@ -1486,6 +1722,7 @@
     });
 
     fieldCache = off;
+    fieldCacheKey = off.width + 'x' + off.height;
   }
 
   function drawGoals(){
@@ -1582,13 +1819,42 @@
 
       // charge meter
       if(team && team.charge > 0.02){
-        const bw = 42, bh = 5;
-        ctx.fillStyle = 'rgba(0,0,0,0.55)';
-        ctx.fillRect(-bw/2, p.radius + 12, bw, bh);
-        const g = ctx.createLinearGradient(-bw/2, 0, bw/2, 0);
-        g.addColorStop(0, '#9fe870'); g.addColorStop(1, '#ff5b3a');
-        ctx.fillStyle = g;
-        ctx.fillRect(-bw/2, p.radius + 12, bw * team.charge, bh);
+        const bw = 52, bh = 6, by = p.radius + 13;
+        const isPower = team.chargeKind === 'power';
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+        ctx.fillRect(-bw/2, by, bw, bh);
+
+        // the ideal band on the power bar: aim to release inside it
+        if(isPower){
+          ctx.fillStyle = 'rgba(255,255,255,0.28)';
+          ctx.fillRect(-bw/2 + bw*SWEET_MIN, by, bw*(SWEET_MAX - SWEET_MIN), bh);
+        }
+
+        const inSweet = isPower && team.charge >= SWEET_MIN && team.charge <= SWEET_MAX;
+        if(inSweet){
+          ctx.fillStyle = '#ffe066';
+        } else {
+          const g = ctx.createLinearGradient(-bw/2, 0, bw/2, 0);
+          g.addColorStop(0, '#9fe870'); g.addColorStop(1, '#ff5b3a');
+          ctx.fillStyle = g;
+        }
+        ctx.fillRect(-bw/2, by, bw * team.charge, bh);
+
+        if(isPower){
+          ctx.strokeStyle = inSweet ? '#ffe066' : 'rgba(255,255,255,0.55)';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(-bw/2 + bw*SWEET_MIN, by - 1, bw*(SWEET_MAX - SWEET_MIN), bh + 2);
+        }
+      }
+
+      // holding a fire shot
+      if(team && team.powerup === 'fire'){
+        const t = performance.now() / 180;
+        ctx.beginPath();
+        ctx.arc(0, 0, p.radius + 13 + Math.sin(t)*2, 0, Math.PI*2);
+        ctx.strokeStyle = 'rgba(255,140,40,0.9)';
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
       }
     }
 
@@ -1611,7 +1877,8 @@
     grad.addColorStop(0, 'rgba(255,255,255,0.55)');
     grad.addColorStop(0.45, base);
     grad.addColorStop(1, shade(base, -0.35));
-    ctx.globalAlpha = (isGK && p.state === 'recovering') ? 0.6 : 1;
+    ctx.globalAlpha = (isGK && p.beatenTimer > 0) ? 0.25
+                    : (isGK && p.state === 'recovering') ? 0.6 : 1;
     ctx.beginPath();
     ctx.arc(0, 0, p.radius, 0, Math.PI*2);
     ctx.fillStyle = grad;
@@ -1837,6 +2104,7 @@
 
     tickSwitchTimers(team1, dt);
     tickSwitchTimers(team2, dt);
+    updatePowerups(dt);
     if(rumbleCooldown[0] > 0) rumbleCooldown[0] -= dt;
     if(rumbleCooldown[1] > 0) rumbleCooldown[1] -= dt;
 
@@ -1889,12 +2157,13 @@
       ctx.translate((Math.random()-0.5) * shake, (Math.random()-0.5) * shake);
     }
 
-    if(!fieldCache) buildFieldCache();
-    ctx.drawImage(fieldCache, 0, 0);
+    if(!fieldCache || fieldCacheKey !== canvas.width + 'x' + canvas.height) buildFieldCache();
+    ctx.drawImage(fieldCache, 0, 0, W, H);
     drawGoals();
     drawTeam(team1);
     drawTeam(team2);
     drawBall();
+    drawPowerups();
     drawParticles();
     drawKickoffCountdown();
     drawCelebration(paused ? 0 : dt);
@@ -1925,6 +2194,7 @@
     score1 = 0; score2 = 0;
     possession = [0, 0];
     particles.length = 0;
+    resetPowerups();
     celebration = null;
     kickoffTimer = 1.2;
     updateScore(null);
