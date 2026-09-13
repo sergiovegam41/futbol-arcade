@@ -176,7 +176,11 @@
       kickCooldown: 0,
       lungeTimer: 0,
       beatenTimer: 0,
+      slideTimer: 0,
+      downTimer: 0,
+      slideDir: null,
       runPhase: Math.random() * 6.28,
+      hairStyle: null, hairColor: null,   // assigned once the squad is built
       home,
       facing: { x: side === 'left' ? 1 : -1, y: 0 }
     };
@@ -200,6 +204,7 @@
       charge: 0,         // charged-shot meter of the controlled player
       chargeHeld: false,
       passCooldown: 0,
+      passHeld: false,
       gk: makePlayer('GK', 0, side, color, 1),
       outfield: SQUAD.map(s => makePlayer(s.role, s.slot, side, color, s.number))
     };
@@ -208,6 +213,20 @@
   const team1 = makeTeam('left',  cssVar('--p1'), true,  'Azul');
   const team2 = makeTeam('right', cssVar('--p2'), false, 'Rojo');
   const teams = [team1, team2];
+
+  // Give every player a look of their own. Styles are dealt out so no two
+  // players in the same side share one, and the pairing is fixed per match.
+  function assignHair(){   // called once below, after HAIR_STYLES exists
+    teams.forEach((team, ti) => {
+      const styles = HAIR_STYLES.slice();
+      const squad = [team.gk].concat(team.outfield);
+      squad.forEach((pl, i) => {
+        const pick = (i * 3 + ti * 5) % styles.length;
+        pl.hairStyle = styles.splice(pick, 1)[0];
+        pl.hairColor = HAIR_COLORS[(i * 2 + ti * 3) % HAIR_COLORS.length];
+      });
+    });
+  }
 
   function allPlayers(){
     return [team1.gk].concat(team1.outfield, [team2.gk], team2.outfield);
@@ -391,6 +410,7 @@
       team.gk.state = 'idle'; team.gk.stateTimer = 0;
       for(const pl of team.outfield){
         pl.x = pl.home.x; pl.y = pl.home.y; pl.vx = 0; pl.vy = 0; pl.lungeTimer = 0;
+        pl.slideTimer = 0; pl.downTimer = 0;
       }
     }
     ball.x = W/2; ball.y = H/2; ball.vx = 0; ball.vy = 0; ball.spin = 0;
@@ -615,8 +635,10 @@
     // into that fixed ranking — filtering first would make the list shift under
     // the cursor on every press and scramble the order you walk through
     const ranked = team.outfield
-      .map((pl, idx) => ({ idx, d: Math.hypot(ball.x - pl.x, ball.y - pl.y) }))
+      .map((pl, idx) => ({ idx, d: Math.hypot(ball.x - pl.x, ball.y - pl.y), pl }))
+      .filter(r => r.pl.slideTimer <= 0 && r.pl.downTimer <= 0)   // not on the floor
       .sort((a, b) => a.d - b.d);
+    if(!ranked.length) return;
 
     // a tap that follows another one continues down the list; otherwise restart
     team.switchCursor = team.chainTimer > 0 ? team.switchCursor + 1 : 0;
@@ -638,6 +660,8 @@
   // they dribble and your deliberate picks are not fought over.
   function claimControl(team, idx){
     if(idx === team.controlledIndex) return;
+    const cand = team.outfield[idx];
+    if(cand && (cand.slideTimer > 0 || cand.downTimer > 0)) return;
     setControlled(team, idx, 0);
   }
 
@@ -651,6 +675,7 @@
     if(owner.role === 'GK') return;                 // keepers are never user-controlled
     const idx = team.outfield.indexOf(owner);
     if(idx < 0 || idx === team.controlledIndex) return;
+    if(owner.slideTimer > 0 || owner.downTimer > 0) return;   // he is on the floor
     // they must still HAVE it, not merely have been the last to touch it
     if(Math.hypot(ball.x - owner.x, ball.y - owner.y) > CARRY_RANGE) return;
     setControlled(team, idx, 0);
@@ -673,6 +698,7 @@
     let bestIdx = -1, bestCost = Infinity;
     team.outfield.forEach((pl, idx) => {
       if(idx === team.controlledIndex) return;
+      if(pl.slideTimer > 0 || pl.downTimer > 0) return;   // not on the floor
       const vx = pl.x - current.x, vy = pl.y - current.y;
       const along = vx * ndx + vy * ndy;             // distance along the pushed direction
       if(along < 25) return;                         // behind you: never a candidate
@@ -853,8 +879,8 @@
   const POWER_TIME  = 0.95;   // seconds to fill the B bar
   const POWER_MIN   = 11.0;
   const POWER_MAX   = 24.0;
-  const SWEET_MIN   = 0.70;   // ideal band, as a fraction of the bar
-  const SWEET_MAX   = 0.90;
+  const SWEET_MIN   = 0.56;   // ideal band, as a fraction of the bar
+  const SWEET_MAX   = 0.74;
 
   // ---- shot rumble -------------------------------------------------------
   // Kicks near the opponent's goal kick back through the pad. The closer to
@@ -951,9 +977,103 @@
     return false;
   }
 
+  /* ---- slide tackle ----
+     A committed, last-ditch challenge: you launch along your heading and win
+     anything you touch, but you end up on the floor and out of the game for
+     well over a second. That downtime IS the cost — go to ground and miss, and
+     the attacker simply runs past the space you used to occupy. */
+  const SLIDE_DURATION = 0.34;
+  const SLIDE_SPEED    = 9.2;
+  const SLIDE_DOWN     = 1.45;   // seconds face-down before you can play again
+  const SLIDE_REACH    = 34;
+
+  function startSlide(team, p){
+    p.slideTimer = SLIDE_DURATION;
+    p.downTimer  = 0;
+    p.slideDir   = { x: p.facing.x, y: p.facing.y };
+    team.charge = 0;
+    team.chargeHeld = false;
+    team.powerHeld = false;
+    sfx.wall();
+    spawnParticles(p.x, p.y + 6, 14, {
+      angle: Math.atan2(-p.facing.y, -p.facing.x), spread: 1.2,
+      speed: 2.6, life: 0.5, size: 4, color: 'rgba(150,205,155,0.8)'
+    });
+  }
+
+  // Runs for every player, controlled or not, before anything else moves them.
+  // Returns true when the player is mid-slide or on the floor, i.e. not
+  // available for normal movement.
+  function updateSlide(team, p, dt){
+    if(p.slideTimer > 0){
+      p.slideTimer -= dt;
+      const d = p.slideDir || p.facing;
+      const dl = Math.hypot(d.x, d.y) || 1;
+      const decay = Math.max(0, p.slideTimer / SLIDE_DURATION);
+      p.vx = (d.x/dl) * SLIDE_SPEED * (0.45 + 0.55 * decay);
+      p.vy = (d.y/dl) * SLIDE_SPEED * (0.45 + 0.55 * decay);
+      p.x += p.vx * dt * 60;
+      p.y += p.vy * dt * 60;
+      clampToPitch(p);
+
+      // anything you reach on the way through, you win
+      if(!ball.heldBy && ballDist(p) < p.radius + ball.radius + SLIDE_REACH){
+        const owner = ballOwner;
+        if(!owner || owner.side !== p.side){
+          const bdx = ball.x - p.x, bdy = ball.y - p.y;
+          const bl = Math.hypot(bdx, bdy) || 1;
+          ball.vx = (bdx/bl) * 6.5;
+          ball.vy = (bdy/bl) * 6.5;
+          ball.shotTimer = 0;
+          registerTouch(team, p);
+          spawnParticles(ball.x, ball.y, 12, {
+            speed: 3, life: 0.4, size: 3, color: 'rgba(255,235,170,0.9)'
+          });
+          flashStatus('¡Barrida de ' + team.name + '!');
+        }
+      }
+
+      if(p.slideTimer <= 0){
+        p.slideTimer = 0;
+        p.downTimer = SLIDE_DOWN;
+        p.vx = 0; p.vy = 0;
+        // you are on the floor: hand the controls to someone still standing
+        if(getControlled(team) === p) switchOffDownedPlayer(team);
+      }
+      return true;
+    }
+
+    if(p.downTimer > 0){
+      p.downTimer -= dt;
+      p.vx = 0; p.vy = 0;
+      if(p.downTimer <= 0) p.downTimer = 0;
+      return true;
+    }
+    return false;
+  }
+
+  function switchOffDownedPlayer(team){
+    let best = -1, bestD = Infinity;
+    team.outfield.forEach((pl, idx) => {
+      if(pl.slideTimer > 0 || pl.downTimer > 0) return;
+      const d = Math.hypot(ball.x - pl.x, ball.y - pl.y);
+      if(d < bestD){ bestD = d; best = idx; }
+    });
+    if(best >= 0) setControlled(team, best, 0);
+  }
+
   function updateControlledPlayer(team, dt){
     const p = getControlled(team);
     const input = getInputFor(team);
+
+    // on the floor (or committed to a slide): no input gets through
+    if(updateSlide(team, p, dt)){
+      team.sprintInput = false;
+      if(p.kickCooldown > 0) p.kickCooldown -= dt;
+      if(team.passCooldown > 0) team.passCooldown -= dt;
+      team.passHeld = !!input.pass;
+      return;
+    }
 
     const len = Math.hypot(input.dx, input.dy);
     let nx = len > 0.05 ? input.dx/len : 0;
@@ -1058,10 +1178,15 @@
       dribble(p, sprinting ? 0.55 : 0.4);
     }
 
-    // ----- pass -----
-    if(input.pass && (carrying || touching) && team.passCooldown <= 0 && p.kickCooldown <= 0){
-      passToTeammate(team, p);
+    // ----- X: pass with the ball, slide tackle without it -----
+    if(input.pass && !team.passHeld){
+      if((carrying || touching) && team.passCooldown <= 0 && p.kickCooldown <= 0){
+        passToTeammate(team, p);
+      } else if(p.slideTimer <= 0 && p.downTimer <= 0){
+        startSlide(team, p);
+      }
     }
+    team.passHeld = !!input.pass;
 
     // running dust
     if((sprinting || p.lungeTimer > 0) && Math.random() < 0.4){
@@ -1139,6 +1264,7 @@
 
     team.outfield.forEach((pl, idx) => {
       if(idx === team.controlledIndex) return;
+      if(updateSlide(team, pl, dt)) return;   // sliding or face-down
 
       if(pl.kickCooldown > 0) pl.kickCooldown -= dt;
 
@@ -1304,12 +1430,12 @@
   // helps, a clean strike (the sweet spot on the B bar) helps more, and a fire
   // shot is very hard to stop. Nothing here models hands or legs — the keeper
   // simply fades out for a moment and the ball goes through.
-  const BEAT_CAP = 0.78;
+  const BEAT_CAP = 0.62;
   function keeperBeatChance(){
-    if(ball.shotFire) return 0.90;
+    if(ball.shotFire) return 0.80;
     const n = clamp01((ball.shotPower - MIN_SHOT) / (POWER_MAX - MIN_SHOT));
-    let c = 0.10 + 0.40 * n;
-    if(ball.shotSweet) c += 0.18;
+    let c = 0.06 + 0.30 * n;
+    if(ball.shotSweet) c += 0.12;   // helps, but never a guarantee
     return Math.min(c, BEAT_CAP);
   }
 
@@ -1776,6 +1902,84 @@
     }
   }
 
+  /* ---- hair ----
+     Seen from above a player is mostly hair, so this is where they get to look
+     like individuals. Drawn in head space (already rotated to the heading), so
+     the parting, the bun and the ponytail all sit at the back of the head and
+     swing round as the player turns. */
+  const HAIR_STYLES = ['buzz', 'afro', 'mohawk', 'ponytail', 'bun', 'curls', 'bald', 'long'];
+  const HAIR_COLORS = ['#2b2119', '#0f0d0c', '#6b4a2a', '#d8b36a', '#a8501f', '#c9c4bd'];
+
+  function drawHair(p){
+    const r = p.radius;
+    const col = p.hairColor;
+    ctx.fillStyle = col;
+    ctx.strokeStyle = col;
+
+    switch(p.hairStyle){
+      case 'bald':
+        ctx.beginPath();                       // just a little fringe at the back
+        ctx.arc(0, 0, r * 0.92, Math.PI * 0.72, Math.PI * 1.28);
+        ctx.lineWidth = r * 0.26;
+        ctx.stroke();
+        break;
+
+      case 'buzz':
+        ctx.beginPath();
+        ctx.arc(0, 0, r * 0.78, 0, Math.PI * 2);
+        ctx.globalAlpha = 0.95;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        break;
+
+      case 'afro':
+        ctx.beginPath();
+        ctx.arc(-r * 0.12, 0, r * 1.12, 0, Math.PI * 2);
+        ctx.fill();
+        break;
+
+      case 'mohawk':
+        ctx.beginPath();                       // a strip running front to back
+        ctx.ellipse(-r * 0.05, 0, r * 0.95, r * 0.3, 0, 0, Math.PI * 2);
+        ctx.fill();
+        break;
+
+      case 'ponytail':
+        ctx.beginPath();
+        ctx.arc(0, 0, r * 0.8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();                       // tail trailing behind the head
+        ctx.ellipse(-r * 1.25, 0, r * 0.5, r * 0.26, 0, 0, Math.PI * 2);
+        ctx.fill();
+        break;
+
+      case 'bun':
+        ctx.beginPath();
+        ctx.arc(0, 0, r * 0.8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(-r * 0.95, 0, r * 0.36, 0, Math.PI * 2);
+        ctx.fill();
+        break;
+
+      case 'curls':
+        for(let i = 0; i < 7; i++){
+          const a = Math.PI * 0.42 + (i / 6) * Math.PI * 1.16;
+          ctx.beginPath();
+          ctx.arc(Math.cos(a) * r * 0.62, Math.sin(a) * r * 0.62, r * 0.35, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        break;
+
+      case 'long':
+      default:
+        ctx.beginPath();                       // wide fall of hair around the back
+        ctx.ellipse(-r * 0.35, 0, r * 0.95, r * 1.02, 0, 0, Math.PI * 2);
+        ctx.fill();
+        break;
+    }
+  }
+
   function drawPlayer(p, isControlled, team){
     const speed = Math.hypot(p.vx, p.vy);
     p.runPhase += speed * 0.09;
@@ -1860,6 +2064,19 @@
 
     ctx.translate(0, bob);
 
+    // sliding: stretched out along the direction of the challenge
+    if(p.slideTimer > 0){
+      const d = p.slideDir || p.facing;
+      const ang = Math.atan2(d.y, d.x);
+      const st = 1 + (p.slideTimer / SLIDE_DURATION) * 0.85;
+      ctx.rotate(ang);
+      ctx.scale(st, 1 / Math.sqrt(st));
+      ctx.rotate(-ang);
+    } else if(p.downTimer > 0){
+      // face-down and out of the game for a moment
+      ctx.scale(1.14, 0.72);   // the fade is applied with the body alpha below
+    }
+
     // GK dive stretch
     if(p.role === 'GK' && p.state === 'diving'){
       const stretch = 1 + Math.min(p.stateTimer / GK_DIVE_DURATION, 1) * 0.9;
@@ -1878,6 +2095,7 @@
     grad.addColorStop(0.45, base);
     grad.addColorStop(1, shade(base, -0.35));
     ctx.globalAlpha = (isGK && p.beatenTimer > 0) ? 0.25
+                    : (p.downTimer > 0) ? 0.45
                     : (isGK && p.state === 'recovering') ? 0.6 : 1;
     ctx.beginPath();
     ctx.arc(0, 0, p.radius, 0, Math.PI*2);
@@ -1886,6 +2104,17 @@
     ctx.lineWidth = 3;
     ctx.strokeStyle = isGK ? p.color : 'rgba(0,0,0,0.4)';
     ctx.stroke();
+
+    // hair, clipped to the head and turned to face the heading
+    if(p.hairStyle){
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(0, 0, p.radius - 1.5, 0, Math.PI*2);
+      ctx.clip();
+      ctx.rotate(Math.atan2(p.facing.y, p.facing.x));
+      drawHair(p);
+      ctx.restore();
+    }
     ctx.globalAlpha = 1;
 
     // jersey number
@@ -1906,6 +2135,17 @@
     ctx.lineWidth = 3.5;
     ctx.lineCap = 'round';
     ctx.stroke();
+
+    // how long until this player is back up
+    if(p.downTimer > 0){
+      ctx.globalAlpha = 1;
+      const frac = p.downTimer / SLIDE_DOWN;
+      ctx.beginPath();
+      ctx.arc(0, 0, p.radius + 7, -Math.PI/2, -Math.PI/2 + Math.PI*2*(1 - frac));
+      ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+    }
 
     ctx.restore();
   }
@@ -2206,5 +2446,6 @@
     sfx.whistle();
   });
 
+  assignHair();
   requestAnimationFrame(gameLoop);
 })();
