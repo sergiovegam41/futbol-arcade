@@ -216,7 +216,12 @@
 
   // Give every player a look of their own. Styles are dealt out so no two
   // players in the same side share one, and the pairing is fixed per match.
+  // Hairstyles are off until real art replaces the drawn shapes. Flip this to
+  // true to bring the placeholder styles back.
+  const HAIR_ENABLED = false;
+
   function assignHair(){   // called once below, after HAIR_STYLES exists
+    if(!HAIR_ENABLED) return;   // leaves hairStyle null, so drawPlayer skips it
     teams.forEach((team, ti) => {
       const styles = HAIR_STYLES.slice();
       const squad = [team.gk].concat(team.outfield);
@@ -623,32 +628,44 @@
     team.chargeHeld = false;
   }
 
-  // Button switch: always works down the squad from the man NEAREST the ball.
-  // A fresh press gives you the closest player; keep tapping within
-  // SWITCH_CHAIN seconds and you walk outwards from there. That way the nearest
-  // player is never more than one press away.
-  const SWITCH_CHAIN = 1.0;   // s a run of taps stays linked
+  // Button switch: cycles ONLY among the men actually near the ball. Anyone
+  // parked on the far side of the pitch is not a useful thing to be handed in
+  // the middle of a move, so they are never offered — use the right stick to
+  // reach them deliberately.
+  const SWITCH_CHAIN  = 1.0;   // s a run of taps stays linked
+  const SWITCH_POOL   = 2;     // how many of the nearest the button rotates between
+  const SWITCH_RADIUS = 480;   // px from the ball beyond which a player is "far"
 
-  function manualSwitch(team){
-    if(!running || paused) return;
-    // rank the WHOLE line by distance to the ball and keep the cursor pointing
-    // into that fixed ranking — filtering first would make the list shift under
-    // the cursor on every press and scramble the order you walk through
+  function switchPool(team){
     const ranked = team.outfield
       .map((pl, idx) => ({ idx, d: Math.hypot(ball.x - pl.x, ball.y - pl.y), pl }))
       .filter(r => r.pl.slideTimer <= 0 && r.pl.downTimer <= 0)   // not on the floor
       .sort((a, b) => a.d - b.d);
-    if(!ranked.length) return;
+    if(!ranked.length) return ranked;
 
-    // a tap that follows another one continues down the list; otherwise restart
+    // If anyone is genuinely near the ball, those are the only candidates —
+    // padding the pool with distant players is exactly the behaviour we do not
+    // want. Only when the whole line is far does the button fall back to the
+    // closest men, so it still does something when play is stretched.
+    const near = ranked.filter(r => r.d <= SWITCH_RADIUS);
+    return near.length ? near : ranked.slice(0, SWITCH_POOL);
+  }
+
+  function manualSwitch(team){
+    if(!running || paused) return;
+    const pool = switchPool(team);
+    if(!pool.length) return;
+
+    // a tap that follows another one steps along the pool; otherwise restart at
+    // the nearest man, so he is never more than one press away
     team.switchCursor = team.chainTimer > 0 ? team.switchCursor + 1 : 0;
     team.chainTimer = SWITCH_CHAIN;
 
-    for(let k = 0; k < ranked.length; k++){
-      const at = (team.switchCursor + k) % ranked.length;
-      if(ranked[at].idx === team.controlledIndex) continue;   // skip yourself
+    for(let k = 0; k < pool.length; k++){
+      const at = (team.switchCursor + k) % pool.length;
+      if(pool[at].idx === team.controlledIndex) continue;   // skip yourself
       team.switchCursor = at;
-      setControlled(team, ranked[at].idx, MANUAL_LOCK);
+      setControlled(team, pool[at].idx, MANUAL_LOCK);
       sfx.pass();
       return;
     }

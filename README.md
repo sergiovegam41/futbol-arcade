@@ -14,7 +14,6 @@ Juego de fútbol arcade para dos jugadores en el mismo equipo, hecho con HTML, C
 - **El control siempre va a quien tiene el balón.** Si un compañero la roba o recibe un pase, pasas a manejarlo a él.
 - **Control cerrado:** mientras la llevas, el balón va pegado al pie y no se escapa solo al girar o esprintar.
 - **Arquero con criterio:** se queda en pie y achica de costado ante la mayoría de remates, y solo se estira cuando la pelota le queda realmente lejos. Sale del área a cortar balones sueltos y, si la atrapa, la reparte a un compañero.
-- **Cada jugador tiene su peinado**, distinto dentro de cada equipo, que gira con la orientación del jugador.
 - **Poderes raros:** de vez en cuando cae un 🔥 **tiro de fuego** en el campo. El primero que lo toca se lo lleva para su equipo y su siguiente disparo sale en llamas, más fuerte y casi imparable. Máximo uno en el campo a la vez y tres por partido.
 - **Vibración del mando** al disparar cerca del arco y cuando te encaran para robarte el balón, más **temblor de pantalla** en los remates al área.
 - Duración configurable (2, 3 o 5 minutos), posesión en vivo, repeticiones de gol con celebración y sonido generado por Web Audio.
@@ -44,7 +43,7 @@ Conecta hasta dos mandos (el navegador los detecta solo después de que presione
 - **Encarar (`Y`):** fija tu orientación sobre el balón y cierras más rápido. Si alcanzas al rival que la lleva, se la quitas y pasas a controlar al que robó.
 - **Arquero:** lee los disparos de verdad, no los regates, así que ya no se le puede provocar la estirada acercándose. Ante un tiro que le pasa cerca se mantiene en pie y da un paso lateral; solo se tira si la pelota va fuera de su alcance, y aun así falla de vez en cuando. Ocasionalmente sale a achicar contra un atacante que se le viene encima. Dentro del área atrapa y saca hacia un compañero libre; fuera del área solo puede despejarla con el pie.
 - **Vibración:** los tiros a menos de 560px del arco rival hacen vibrar el mando de ese jugador, más fuerte cuanto más cerca y más potente. También vibra el mando del que lleva el balón cuando un rival lo encara, subiendo de intensidad según se acerca, con un golpe seco al perderla. Requiere un mando con soporte de haptics; sin él, el juego funciona igual.
-- **Cambio de jugador:** es manual. La primera pulsación te da el más cercano al balón; pulsaciones seguidas recorren hacia afuera. El único cambio automático es el de posesión.
+- **Cambio de jugador:** es manual. El botón solo alterna entre los jugadores cerca del balón (480px): la primera pulsación te da el más cercano y las siguientes rotan entre ese grupo, nunca te entrega a alguien parado en la otra punta. Para llegar a un jugador lejano usa la palanca derecha. El único cambio automático es el de posesión.
 
 ## Estructura
 
