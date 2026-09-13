@@ -27,11 +27,12 @@ Conecta hasta dos mandos (el navegador los detecta solo después de que presione
 | Mover | Joystick izq. | `W` `A` `S` `D` | flechas |
 | Tiro al arco (mantén para cargar) | `A` | `Espacio` | `Enter` |
 | Tiro fuerte (mantén) | `B` | `F` | `/` |
-| Tiro con rosca | `B` + `RB` | — | — |
-| Centro / pase alto | `A` + `RB` | — | — |
+| Tiro con rosca | `B` + `RB` | `F` + `C` | `/` + `Shift` der. |
+| Centro / pase alto | `A` + `RB` | `Espacio` + `C` | `Enter` + `Shift` der. |
 | Pase (con balón) / Barrida (sin balón) | `X` | `E` | `.` |
 | Encarar / robar | `Y` o `LT` | `R` | `,` |
-| Sprint | `RB` / `RT` | `Shift` | `Ctrl` der. |
+| Sprint | `RT` | `Shift` izq. | `Ctrl` der. |
+| Modificador de tiro | `RB` | `C` | `Shift` der. |
 | Cambiar al más cercano | `LB` | `Q` | `M` |
 | Elegir por dirección | Palanca derecha | — | — |
 | Pausa | — | `P` o `Esc` | `P` o `Esc` |
@@ -41,7 +42,7 @@ Conecta hasta dos mandos (el navegador los detecta solo después de que presione
 - **Tiro cargado:** mantén el botón de tiro y suéltalo. La barra bajo el jugador muestra la potencia. Cuanta más carga, más asistencia hacia la portería.
 - **Tiro fuerte (`B`):** mantén para llenar la barra de potencia. La barra tiene una **zona ideal** marcada: soltar dentro de ella da un golpeo limpio, preciso y mucho más difícil de atajar. Pasarte de carga da más pique pero menos control, y el disparo se abre.
 - **Tiro con rosca (`B` + `RB`):** sale abierto hacia fuera y vuelve hacia el arco. Desde un ángulo cerrado donde el tiro recto se va fuera, la rosca entra.
-- **Centro / pase alto (`A` + `RB`):** cuelga el balón por el aire hasta un compañero. La carga define la altura: uno bajo lo corta cualquiera que salte (pulsando el botón de tiro), uno alto pasa por encima de todos. El balón crece y se separa de su sombra; la sombra marca dónde va a caer.
+- **Centro / pase alto (`A` + `RB`):** `RT` corre y `RB` es el modificador de tiro, botones distintos, así que correr nunca convierte un disparo en un globo: el balón solo se eleva si mantienes `RB`. Cuelga el balón por el aire hasta un compañero. La carga define la altura: uno bajo lo corta cualquiera que salte (pulsando el botón de tiro), uno alto pasa por encima de todos. El balón crece y se separa de su sombra; la sombra marca dónde va a caer.
 - **Barrida (`X` sin balón):** entrada agresiva. Te lanzas por delante y te llevas cualquier balón que toques, pero terminas en el suelo casi un segundo y medio sin poder jugar, y el control pasa a otro compañero. Fallarla deja al rival con el camino libre.
 - **Atajadas:** que el arquero llegue a la pelota no significa que la agarre. Según la potencia, la calidad del golpeo y **sobre todo la distancia** hay probabilidad de que se le escape: el arquero se pone traslúcido un instante y el balón sigue de largo. Desde lejos tiene tiempo de acomodarse, así que un tiro de media cancha casi nunca se le pasa aunque aciertes la zona ideal — hay que acercarse.
 - **Balón en las manos:** mientras el arquero la sostiene no hay forma de quitársela (ni por contacto, ni encarando, ni barriendo, ni pateando), los rivales son apartados para que no acampen encima, y el saque queda protegido un instante para que no se lo roben al soltarla.

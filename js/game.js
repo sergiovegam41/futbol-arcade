@@ -85,7 +85,7 @@
   const keys = {};
   const capturedKeys = ['Space','Enter','ArrowUp','ArrowDown','ArrowLeft','ArrowRight',
                         'KeyQ','KeyM','KeyE','Period','KeyP',
-                        'KeyF','KeyR','Slash','Comma'];
+                        'KeyF','KeyR','Slash','Comma','KeyC'];
   window.addEventListener('keydown', e => {
     if(capturedKeys.includes(e.code)) e.preventDefault();
     if(e.repeat){ keys[e.code] = true; return; }
@@ -198,6 +198,7 @@
       powerup: null,
       powerupTimer: 0,
       curveAim: 0,
+      modArmed: false,
       chargeKind: null,
       containing: false,
       powerHeld: false,
@@ -421,6 +422,7 @@
       team.claimHold = 0;
       team.switchCursor = 0;
       team.chainTimer = 0;
+      team.modArmed = false;
       team.containing = false;
       team.powerHeld = false;
       team.advance = 0;
@@ -560,7 +562,8 @@
       power:   btn(1),                      // B  — hard shot on goal
       pass:    btn(2),                      // X  — pass
       contain: btn(3) || btn(6),            // Y / LT — face up and steal
-      sprint:  btn(5) || btn(7),            // RB / RT
+      sprint:  btn(7),                      // RT — run
+      modifier: btn(5),                     // RB — shot modifier (loft / curl)
       switchBtn: btn(4),                    // LB
       rsx, rsy
     };
@@ -779,7 +782,7 @@
     const pad = readPadInput(team.isP1 ? 0 : 1);
     if(pad) return pad;
     let dx = 0, dy = 0, kick = false, sprint = false, pass = false,
-        power = false, contain = false;
+        power = false, contain = false, modifier = false;
     if(team.isP1){
       if(keys['KeyA']) dx -= 1;
       if(keys['KeyD']) dx += 1;
@@ -789,7 +792,8 @@
       pass    = !!keys['KeyE'];
       power   = !!keys['KeyF'];
       contain = !!keys['KeyR'];
-      sprint  = !!keys['ShiftLeft'] || !!keys['ShiftRight'];
+      sprint  = !!keys['ShiftLeft'];
+      modifier = !!keys['KeyC'];
     } else {
       if(keys['ArrowLeft'])  dx -= 1;
       if(keys['ArrowRight']) dx += 1;
@@ -800,8 +804,9 @@
       power   = !!keys['Slash'];
       contain = !!keys['Comma'];
       sprint  = !!keys['ControlRight'];
+      modifier = !!keys['ShiftRight'];
     }
-    return {dx, dy, kick, pass, sprint, power, contain};
+    return {dx, dy, kick, pass, sprint, power, contain, modifier};
   }
 
   /* =========================================================
@@ -1268,7 +1273,9 @@
 
     // sprint: the human's sprint is what drags the whole team along (see updateTeamSprint)
     const sprinting = !!input.sprint && (nx !== 0 || ny !== 0);
-    const sprintHeld = !!input.sprint;   // RB on its own, used as a shot modifier
+    // RT runs, RB modifies. They are separate buttons, so holding the modifier
+    // is unambiguous — running never turns a shot into a lofted ball.
+    const modHeld = !!input.modifier;
     const containing = !!input.contain;
     const spd = p.speed * 1.1
               * (sprinting ? p.sprintMult : 1)
@@ -1313,10 +1320,12 @@
     const canStrike  = carrying || (touching && p.kickCooldown <= 0);
 
     if(wantPower){
+      if(!team.chargeHeld) team.modArmed = false;   // new wind-up: clear the modifier
       team.charge = Math.min(team.charge + dt / POWER_TIME, 1);
       team.chargeKind = 'power';
       team.chargeHeld = true;
       team.powerHeld  = true;
+      if(modHeld) team.modArmed = true;
       if(carrying) carryBall(p, false);          // glued while winding up
 
     } else if(team.powerHeld){
@@ -1330,8 +1339,8 @@
         aimAtGoal(p, team, sweet ? 0.80 : 0.55);
         shoot(p, power, spread, true);   // B is the only thing that spends a fire shot
         ball.shotSweet = sweet;
-        // B + sprint curls it around the keeper
-        if(sprintHeld){
+        // B + a tap of RB curls it around the keeper
+        if(team.modArmed || modHeld){
           applyCurl(team, p, c);
           flashStatus('¡Tiro con rosca!');
         }
@@ -1345,17 +1354,20 @@
       team.chargeHeld = false;
       team.powerHeld  = false;
       team.chargeKind = null;
+      team.modArmed = false;
 
     } else if(wantPlaced){
+      if(!team.chargeHeld) team.modArmed = false;   // new wind-up: clear the modifier
       team.charge = Math.min(team.charge + dt / CHARGE_TIME, 1);
       team.chargeKind = 'placed';
       team.chargeHeld = true;
+      if(modHeld) team.modArmed = true;
       if(carrying) carryBall(p, false);
 
     } else if(team.chargeHeld){
       const power = MIN_SHOT + (MAX_SHOT - MIN_SHOT) * team.charge;
-      if(canStrike && sprintHeld){
-        loftedPass(team, p, team.charge);     // A + sprint clips it into the air
+      if(canStrike && (team.modArmed || modHeld)){
+        loftedPass(team, p, team.charge);     // A + a tap of RB clips it into the air
         shotRumble(team, p, power * 0.6);
       } else if(canStrike){
         // the harder you hit it, the more it counts as a shot on goal
@@ -1369,6 +1381,7 @@
       team.charge = 0;
       team.chargeHeld = false;
       team.chargeKind = null;
+      team.modArmed = false;
 
     } else if(carrying && !stole){
       carryBall(p, sprinting);            // close control: the ball stays on your feet
