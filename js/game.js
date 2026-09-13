@@ -241,7 +241,8 @@
     x: W/2, y: H/2, vx:0, vy:0, radius:11,
     friction:0.986, spin:0, trail:[],
     // a real strike, as opposed to a dribble touch: this is what the keeper reads
-    shotTimer:0, shotSide:null, shotId:0, heldBy:null, shotPower:0, shotSweet:false, shotFire:false
+    shotTimer:0, shotSide:null, shotId:0, heldBy:null, shotPower:0, shotSweet:false, shotFire:false, shotDist:0,
+    releaseGuard:0, releaseSide:null
   };
 
   /* =========================================================
@@ -421,6 +422,7 @@
     ball.x = W/2; ball.y = H/2; ball.vx = 0; ball.vy = 0; ball.spin = 0;
     ball.trail.length = 0;
     ball.heldBy = null; ball.shotTimer = 0; ball.shotSide = null;
+    ball.releaseGuard = 0; ball.releaseSide = null;
     for(const t of teams){ t.gk.state = "idle"; t.gk.stateTimer = 0; t.gk.readShot = -1; }
     lastTouchTeam = towardSide || null;
     ballOwner = null;
@@ -778,6 +780,15 @@
   function ballDist(p){ return Math.hypot(ball.x - p.x, ball.y - p.y); }
   function canTouch(p){ return ballDist(p) < p.radius + ball.radius + 6; }
 
+  // The ball is off-limits to a player when the keeper has it in his hands,
+  // and briefly afterwards for the opposition: you cannot rob a keeper who is
+  // holding it, nor stand on his toes and take the release off him.
+  function ballLocked(p){
+    if(ball.heldBy) return ball.heldBy !== p;
+    if(ball.releaseGuard > 0 && ball.releaseSide && ball.releaseSide !== p.side) return true;
+    return false;
+  }
+
   // Every touch is routed through here, so a change of ball owner is detected in
   // exactly one place — and that change is what hands the player the controls.
   function registerTouch(team, player){
@@ -829,6 +840,10 @@
     ball.shotPower = pw;
     ball.shotSweet = false;
     ball.shotFire  = fire;
+    // how far out it was struck from: a keeper has time to set himself for a
+    // long shot, so distance is part of whether it beats him
+    const tgoal = opponentGoal(tm);
+    ball.shotDist = Math.hypot(tgoal.x - p.x, tgoal.y - p.y);
     ball.shotId++;
     ball.heldBy = null;
     p.kickCooldown = 0.3;
@@ -967,12 +982,12 @@
     const victim = team === team1 ? team2 : team1;
 
     // the man being closed down feels it building in his pad before contact
-    if(theirs && bd < 190 && !ball.heldBy){
+    if(theirs && bd < 190 && !ballLocked(p)){
       const close = 1 - (bd - 40) / 150;
       pressureRumble(victim, 0.18 + 0.42 * Math.max(0, Math.min(1, close)));
     }
 
-    if(bd < p.radius + ball.radius + CONTAIN_REACH && theirs && !ball.heldBy){
+    if(bd < p.radius + ball.radius + CONTAIN_REACH && theirs && !ballLocked(p)){
       // knock it loose, away from the man who had it
       const power = 5.5;
       ball.vx = (bdx/bd) * power;
@@ -1034,7 +1049,7 @@
       clampToPitch(p);
 
       // anything you reach on the way through, you win
-      if(!ball.heldBy && ballDist(p) < p.radius + ball.radius + SLIDE_REACH){
+      if(!ballLocked(p) && ballDist(p) < p.radius + ball.radius + SLIDE_REACH){
         const owner = ballOwner;
         if(!owner || owner.side !== p.side){
           const bdx = ball.x - p.x, bdy = ball.y - p.y;
@@ -1118,7 +1133,7 @@
     if(p.lungeTimer   > 0) p.lungeTimer   -= dt;
     if(team.passCooldown > 0) team.passCooldown -= dt;
 
-    const touching = canTouch(p) && !ball.heldBy;
+    const touching = canTouch(p) && !ballLocked(p);
     if(touching) registerTouch(team, p);
 
     // you are carrying the ball if you own it and it is still at your feet
@@ -1332,7 +1347,7 @@
       clampToPitch(pl);
 
       // AI ball interaction: shoot near goal, otherwise drive the ball forward
-      if(canTouch(pl) && !ball.heldBy){
+      if(canTouch(pl) && !ballLocked(pl)){
         registerTouch(team, pl);   // a change of owner hands you the controls
         const goal = opponentGoal(team);
         const distToGoal = Math.hypot(goal.x - pl.x, goal.y - pl.y);
@@ -1374,6 +1389,7 @@
   const GK_DIVE_DURATION    = 0.30;
   const GK_RECOVER_DURATION = 1.15;
   const GK_HOLD_DURATION    = 0.7;   // time spent holding it before distributing
+  const GK_HOLD_SPACE       = 62;    // px of room opponents must give him while he holds
   const GK_RUSH_RANGE       = 340;   // how far off the line it will come
   const GK_REACH            = 70;    // lateral gap that actually justifies a dive
   const GK_DIVE_CHANCE      = 0.88;  // even a good keeper is beaten sometimes
@@ -1422,6 +1438,8 @@
       if(score > bestScore){ bestScore = score; best = mate; }
     }
     ball.heldBy = null;
+    ball.releaseGuard = 0.4;      // nobody challenges a keeper's release
+    ball.releaseSide = gk.side;
     if(!best){
       // nobody to aim at: just clear it upfield
       const dirY = (Math.random() - 0.5) * 1.1;
@@ -1447,13 +1465,28 @@
   // helps, a clean strike (the sweet spot on the B bar) helps more, and a fire
   // shot is very hard to stop. Nothing here models hands or legs — the keeper
   // simply fades out for a moment and the ball goes through.
-  const BEAT_CAP = 0.62;
+  const BEAT_CAP   = 0.62;
+  const BEAT_CLOSE = 210;   // px from goal: inside this, distance costs nothing
+  const BEAT_FAR   = 780;   // px from goal: at or past this, the keeper is set
+  const BEAT_FAR_MULT = 0.20;
+
+  // Distance is the strongest damper of all: from range the keeper simply has
+  // time to get across and set himself, so even a perfectly struck shot into
+  // his chest is very unlikely to squirm through.
+  function beatDistanceMult(){
+    const d = ball.shotDist || 0;
+    const near = clamp01((BEAT_FAR - d) / (BEAT_FAR - BEAT_CLOSE));
+    return BEAT_FAR_MULT + (1 - BEAT_FAR_MULT) * near;
+  }
+
   function keeperBeatChance(){
-    if(ball.shotFire) return 0.80;
+    const dm = beatDistanceMult();
+    // a fire shot still loses some of its edge from distance, but not all
+    if(ball.shotFire) return 0.80 * Math.max(dm, 0.55);
     const n = clamp01((ball.shotPower - MIN_SHOT) / (POWER_MAX - MIN_SHOT));
     let c = 0.06 + 0.30 * n;
     if(ball.shotSweet) c += 0.12;   // helps, but never a guarantee
-    return Math.min(c, BEAT_CAP);
+    return Math.min(c, BEAT_CAP) * dm;
   }
 
   const BEATEN_FLAVOURS = [
@@ -1501,6 +1534,25 @@
     if(gk.state === 'holding'){
       gk.stateTimer += dt;
       ball.heldBy = gk;
+      // opponents have to give him room: they cannot camp on his toes waiting
+      // for the release, exactly as they must back off in the real game
+      const foes = team === team1 ? team2 : team1;
+      let pressed = false;
+      for(const f of foes.outfield){
+        const dx = f.x - gk.x, dy = f.y - gk.y;
+        const d = Math.hypot(dx, dy);
+        if(d < GK_HOLD_SPACE && d > 0.001){
+          pressed = true;
+          const push = (GK_HOLD_SPACE - d);
+          f.x += (dx/d) * push;
+          f.y += (dy/d) * push;
+          clampToPitch(f);
+        }
+      }
+      // if he is still being closed down, he holds on a little longer
+      if(pressed && gk.stateTimer > GK_HOLD_DURATION * 0.5){
+        gk.stateTimer -= dt * 0.6;
+      }
       ball.vx = 0; ball.vy = 0;
       const fx = gk.side === 'left' ? 1 : -1;
       ball.x = gk.x + fx * (gk.radius + ball.radius + 2);
@@ -1716,6 +1768,7 @@
 
   function updateBall(dt){
     if(ball.shotTimer > 0) ball.shotTimer -= dt;
+    if(ball.releaseGuard > 0) ball.releaseGuard -= dt;
     if(ball.heldBy){ ball.trail.length = 0; return; }   // in the keeper's hands
     ball.x += ball.vx * dt * 60;
     ball.y += ball.vy * dt * 60;
