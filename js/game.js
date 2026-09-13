@@ -196,6 +196,8 @@
       switchCursor: 0,
       chainTimer: 0,
       powerup: null,
+      powerupTimer: 0,
+      curveAim: 0,
       chargeKind: null,
       containing: false,
       powerHeld: false,
@@ -242,7 +244,8 @@
     friction:0.986, spin:0, trail:[],
     // a real strike, as opposed to a dribble touch: this is what the keeper reads
     shotTimer:0, shotSide:null, shotId:0, heldBy:null, shotPower:0, shotSweet:false, shotFire:false, shotDist:0,
-    releaseGuard:0, releaseSide:null
+    releaseGuard:0, releaseSide:null, curve:0,
+    z:0, vz:0, loftTeam:null
   };
 
   /* =========================================================
@@ -260,6 +263,7 @@
   const PU_INTERVAL_MIN   = 30;   // s between attempts afterwards
   const PU_INTERVAL_MAX   = 55;
   const PU_LIFETIME       = 14;   // s it waits on the pitch before fading
+  const PU_HOLD_TIME      = 15;   // s you may hold it before it burns out
 
   const powerups = [];
   let puSpawned = 0;
@@ -269,10 +273,21 @@
     powerups.length = 0;
     puSpawned = 0;
     puTimer = PU_FIRST_DELAY;
-    for(const t of teams){ t.powerup = null; }
+    for(const t of teams){ t.powerup = null; t.powerupTimer = 0; }
   }
 
   function updatePowerups(dt){
+    // a stored power does not keep forever
+    for(const t of teams){
+      if(t.powerup && t.powerupTimer > 0){
+        t.powerupTimer -= dt;
+        if(t.powerupTimer <= 0){
+          t.powerup = null;
+          t.powerupTimer = 0;
+          flashStatus('El poder de ' + t.name + ' se apagó');
+        }
+      }
+    }
     puTimer -= dt;
     if(puTimer <= 0 && powerups.length < PU_MAX_ON_PITCH && puSpawned < PU_MAX_PER_MATCH){
       // drop it around the middle third so neither side simply owns it
@@ -305,6 +320,7 @@
         for(const pl of team.outfield){
           if(Math.hypot(pl.x - pu.x, pl.y - pu.y) < pl.radius + pu.radius){
             team.powerup = pu.kind;
+            team.powerupTimer = PU_HOLD_TIME;
             powerups.splice(i, 1);
             sfx.goal();
             shake = Math.max(shake, 8);
@@ -422,8 +438,12 @@
     ball.x = W/2; ball.y = H/2; ball.vx = 0; ball.vy = 0; ball.spin = 0;
     ball.trail.length = 0;
     ball.heldBy = null; ball.shotTimer = 0; ball.shotSide = null;
-    ball.releaseGuard = 0; ball.releaseSide = null;
-    for(const t of teams){ t.gk.state = "idle"; t.gk.stateTimer = 0; t.gk.readShot = -1; }
+    ball.releaseGuard = 0; ball.releaseSide = null; ball.curve = 0;
+    ball.z = 0; ball.vz = 0; ball.loftTeam = null;
+    for(const t of teams){
+      t.gk.state = "idle"; t.gk.stateTimer = 0; t.gk.readShot = -1;
+      t.gk.reactTimer = 0; t.gk.reactShot = -1; t.gk.beatenTimer = 0;
+    }
     lastTouchTeam = towardSide || null;
     ballOwner = null;
   }
@@ -638,19 +658,29 @@
   const SWITCH_POOL   = 2;     // how many of the nearest the button rotates between
   const SWITCH_RADIUS = 480;   // px from the ball beyond which a player is "far"
 
+  // Which line the button offers you, decided by where the ball is: with play in
+  // the opponent's half you are cycling strikers, and once it comes back into
+  // your own half you are cycling defenders. It matches what you are trying to
+  // do in each phase instead of handing you whoever happens to be closest.
+  function switchLine(team){
+    const ownHalf = team.side === 'left' ? ball.x < halfW : ball.x > halfW;
+    return ownHalf ? 'DEF' : 'FWD';
+  }
+
   function switchPool(team){
-    const ranked = team.outfield
+    const available = team.outfield
       .map((pl, idx) => ({ idx, d: Math.hypot(ball.x - pl.x, ball.y - pl.y), pl }))
       .filter(r => r.pl.slideTimer <= 0 && r.pl.downTimer <= 0)   // not on the floor
       .sort((a, b) => a.d - b.d);
-    if(!ranked.length) return ranked;
+    if(!available.length) return available;
 
-    // If anyone is genuinely near the ball, those are the only candidates —
-    // padding the pool with distant players is exactly the behaviour we do not
-    // want. Only when the whole line is far does the button fall back to the
-    // closest men, so it still does something when play is stretched.
-    const near = ranked.filter(r => r.d <= SWITCH_RADIUS);
-    return near.length ? near : ranked.slice(0, SWITCH_POOL);
+    const line = available.filter(r => r.pl.role === switchLine(team));
+    if(line.length) return line;
+
+    // that whole line is unavailable: fall back to whoever is near the ball,
+    // and if nobody is, to the closest men, so the button always does something
+    const near = available.filter(r => r.d <= SWITCH_RADIUS);
+    return near.length ? near : available.slice(0, SWITCH_POOL);
   }
 
   function manualSwitch(team){
@@ -778,7 +808,17 @@
      Ball contact helpers
      ========================================================= */
   function ballDist(p){ return Math.hypot(ball.x - p.x, ball.y - p.y); }
-  function canTouch(p){ return ballDist(p) < p.radius + ball.radius + 6; }
+  // A ball in the air is only reachable up to a point: on the deck anyone can
+  // play it, a bit higher you have to go up for it (hold the shoot button),
+  // and a proper cross sails over everybody.
+  const REACH_LOW    = 9;    // height you can play without going up for it
+  const REACH_JUMP   = 32;   // height you reach when you challenge for it
+  const REACH_KEEPER = 46;   // keepers claim crosses higher than anyone
+
+  function canTouch(p, jumping){
+    if(ballDist(p) >= p.radius + ball.radius + 3) return false;
+    return ball.z <= (jumping ? REACH_JUMP : REACH_LOW);
+  }
 
   // The ball is off-limits to a player when the keeper has it in his hands,
   // and briefly afterwards for the opposition: you cannot rob a keeper who is
@@ -814,13 +854,15 @@
 
   function teamOf(p){ return p.side === team1.side ? team1 : team2; }
 
-  function shoot(p, power, spread){
-    // a stored fire shot is spent here, whoever on the team takes the strike
+  // `allowFire` is only true for the hard shot on B: a stored fire shot is a
+  // shooting power, so passing, clearing or a tap finish never burns it.
+  function shoot(p, power, spread, allowFire){
     const tm = teamOf(p);
     let pw = power, sp = spread;
-    const fire = tm.powerup === 'fire';
+    const fire = allowFire === true && tm.powerup === 'fire';
     if(fire){
       tm.powerup = null;
+      tm.powerupTimer = 0;
       pw = power * 1.35;
       sp = (spread || 0) * 0.3;
       shake = Math.max(shake, 14);
@@ -835,6 +877,7 @@
     ball.vy = Math.sin(ang) * pw;
     ball.spin = (Math.random() - 0.5) * 0.5 + pw * 0.03;
     // flag it as a genuine shot so goalkeepers only commit to real strikes
+    ball.curve     = 0;
     ball.shotTimer = 1.3;
     ball.shotSide  = p.side;
     ball.shotPower = pw;
@@ -874,6 +917,79 @@
     p.facing.y = ay/alen;
   }
 
+  /* ---- lofted pass / cross ----
+     Hold sprint while you release the shoot button and you clip it into the
+     air instead of along the floor. The charge sets how high it goes, and the
+     horizontal speed is solved so it still lands on your target: a light one
+     is a fast flat ball anyone can cut out, a full one hangs above everybody
+     and drops on the far post. */
+  const GRAVITY     = 0.085;   // px per frame squared
+  const LOFT_MIN_VZ = 1.45;
+  const LOFT_MAX_VZ = 3.65;
+  const LOFT_MAX_HS = 15;      // cap on horizontal speed
+
+  function pickPassTarget(team, p){
+    let best = null, bestScore = -Infinity;
+    const fx = p.facing.x, fy = p.facing.y;
+    const flen = Math.hypot(fx, fy) || 1;
+    for(const mate of team.outfield){
+      if(mate === p) continue;
+      if(mate.downTimer > 0 || mate.slideTimer > 0) continue;
+      const vx = mate.x - p.x, vy = mate.y - p.y;
+      const d = Math.hypot(vx, vy) || 1;
+      const align = ((vx/d) * (fx/flen) + (vy/d) * (fy/flen));
+      const score = align * 1.6 - d / 900;   // prefer mates ahead of the heading
+      if(score > bestScore){ bestScore = score; best = mate; }
+    }
+    return best;
+  }
+
+  function loftedPass(team, p, charge){
+    const best = pickPassTarget(team, p);
+    let dx, dy, d;
+    if(best){
+      dx = best.x - p.x; dy = best.y - p.y;
+      d = Math.hypot(dx, dy) || 1;
+    } else {
+      const fl = Math.hypot(p.facing.x, p.facing.y) || 1;
+      dx = (p.facing.x/fl) * 360; dy = (p.facing.y/fl) * 360;
+      d = 360;
+    }
+    const vz0    = LOFT_MIN_VZ + (LOFT_MAX_VZ - LOFT_MIN_VZ) * charge;
+    const frames = (2 * vz0) / GRAVITY;               // time until it lands
+    const hs     = Math.min(d / frames, LOFT_MAX_HS); // solved to land on target
+
+    ball.vx = (dx/d) * hs;
+    ball.vy = (dy/d) * hs;
+    ball.z  = 2;
+    ball.vz = vz0;
+    ball.loftTeam = team;
+    ball.curve = 0;
+    ball.spin = 0.25;
+    ball.shotTimer = 0;          // a cross is not a shot: keepers must not read it
+    ball.heldBy = null;
+    p.kickCooldown = 0.3;
+    team.passCooldown = 0.3;
+    sfx.pass();
+    spawnParticles(ball.x, ball.y, 8, { speed: 2, life: 0.3, size: 3 });
+    flashStatus(charge > 0.55 ? '¡Centro colgado!' : 'Pase alto');
+  }
+
+  function ballLanded(){
+    // a soft feedback beat so it reads as having hit the grass
+    spawnParticles(ball.x, ball.y + 4, 10, {
+      angle: -Math.PI/2, spread: 2.4, speed: 1.6, life: 0.4, size: 3,
+      color: 'rgba(170,215,175,0.8)'
+    });
+    sfx.wall();
+    if(ball.loftTeam){
+      const i = ball.loftTeam.isP1 ? 0 : 1;
+      rumbleCooldown[i] = 0;
+      pressureRumble(ball.loftTeam, 0.5);
+    }
+    ball.loftTeam = null;
+  }
+
   function passToTeammate(team, p){
     let best = null, bestScore = -Infinity;
     const fx = p.facing.x, fy = p.facing.y;
@@ -902,6 +1018,43 @@
   /* =========================================================
      Controlled player
      ========================================================= */
+  /* ---- curled shot (B + sprint) ----
+     A first attempt tied the bend to which way you were leaning, but leaning
+     also turns the player, so the two cancelled out and nothing ever curled.
+     This instead does what the shot is for: it leaves wide of the keeper and
+     bends back in, wrapping around him towards goal.  */
+  const CURVE_OPEN = 0.26;    // rad the ball starts off-line before bending back
+
+  function applyCurl(team, p, charge){
+    const sp = Math.hypot(ball.vx, ball.vy);
+    if(sp < 0.001) return;
+    const goal = opponentGoal(team);
+
+    // 1. lean the shot towards the mouth so the curl has something to wrap onto
+    const gx = goal.x - ball.x, gy = goal.y - ball.y;
+    const gl = Math.hypot(gx, gy) || 1;
+    const bias = 0.7;
+    let vx = ball.vx / sp * (1 - bias) + (gx/gl) * bias;
+    let vy = ball.vy / sp * (1 - bias) + (gy/gl) * bias;
+    const vl = Math.hypot(vx, vy) || 1;
+    vx /= vl; vy /= vl;
+
+    // 2. open it up to one side — the side the keeper is not expecting
+    let dir = Math.sign(goal.y - p.y);
+    if(dir === 0) dir = Math.random() < 0.5 ? -1 : 1;
+    const open = CURVE_OPEN * (0.7 + 0.3 * charge);
+    const ang  = Math.atan2(vy, vx) - dir * open;
+    ball.vx = Math.cos(ang) * sp;
+    ball.vy = Math.sin(ang) * sp;
+
+    // 3. bend it back by exactly as much as it takes to close on the mouth
+    //    again by the time it gets there — hence solving for the flight time
+    //    instead of using a fixed strength that only works at one range.
+    const frames = Math.max(12, gl / sp);
+    ball.curve = dir * (2 * sp * Math.sin(open)) / frames;
+    ball.spin  = dir * 0.9;
+  }
+
   const CHARGE_TIME = 0.62;
   const MAX_SHOT    = 17.5;
   const MIN_SHOT    = 9.0;
@@ -969,7 +1122,7 @@
   // ---- face up and steal -------------------------------------------------
   // Hold the contain button to lock your heading onto the ball and close it
   // down. Reach it and you strip it off whoever had it.
-  const CONTAIN_REACH = 46;
+  const CONTAIN_REACH = 24;
 
   function containAndSteal(team, p){
     const bdx = ball.x - p.x, bdy = ball.y - p.y;
@@ -987,7 +1140,8 @@
       pressureRumble(victim, 0.18 + 0.42 * Math.max(0, Math.min(1, close)));
     }
 
-    if(bd < p.radius + ball.radius + CONTAIN_REACH && theirs && !ballLocked(p)){
+    if(bd < p.radius + ball.radius + CONTAIN_REACH && theirs && !ballLocked(p) &&
+       ball.z <= REACH_JUMP){
       // knock it loose, away from the man who had it
       const power = 5.5;
       ball.vx = (bdx/bd) * power;
@@ -1017,7 +1171,7 @@
   const SLIDE_DURATION = 0.34;
   const SLIDE_SPEED    = 9.2;
   const SLIDE_DOWN     = 1.45;   // seconds face-down before you can play again
-  const SLIDE_REACH    = 34;
+  const SLIDE_REACH    = 20;
 
   function startSlide(team, p){
     p.slideTimer = SLIDE_DURATION;
@@ -1049,7 +1203,8 @@
       clampToPitch(p);
 
       // anything you reach on the way through, you win
-      if(!ballLocked(p) && ballDist(p) < p.radius + ball.radius + SLIDE_REACH){
+      if(!ballLocked(p) && ball.z <= REACH_LOW &&
+         ballDist(p) < p.radius + ball.radius + SLIDE_REACH){
         const owner = ballOwner;
         if(!owner || owner.side !== p.side){
           const bdx = ball.x - p.x, bdy = ball.y - p.y;
@@ -1113,6 +1268,7 @@
 
     // sprint: the human's sprint is what drags the whole team along (see updateTeamSprint)
     const sprinting = !!input.sprint && (nx !== 0 || ny !== 0);
+    const sprintHeld = !!input.sprint;   // RB on its own, used as a shot modifier
     const containing = !!input.contain;
     const spd = p.speed * 1.1
               * (sprinting ? p.sprintMult : 1)
@@ -1133,11 +1289,13 @@
     if(p.lungeTimer   > 0) p.lungeTimer   -= dt;
     if(team.passCooldown > 0) team.passCooldown -= dt;
 
-    const touching = canTouch(p) && !ballLocked(p);
+    // pressing the shoot button is also how you go up for a high ball
+    const touching = canTouch(p, !!input.kick || !!input.power) && !ballLocked(p);
     if(touching) registerTouch(team, p);
 
     // you are carrying the ball if you own it and it is still at your feet
-    const carrying = ballOwner === p && ballDist(p) < CARRY_RANGE && p.kickCooldown <= 0;
+    const carrying = ballOwner === p && ballDist(p) < CARRY_RANGE &&
+                     p.kickCooldown <= 0 && ball.z <= REACH_LOW;
 
     // ----- face up and steal (hold) -----
     let stole = false;
@@ -1170,8 +1328,13 @@
         const overhit = Math.max(0, c - SWEET_MAX) / (1 - SWEET_MAX);
         const spread  = sweet ? 0.015 : 0.055 + overhit * 0.11;
         aimAtGoal(p, team, sweet ? 0.80 : 0.55);
-        shoot(p, power, spread);
+        shoot(p, power, spread, true);   // B is the only thing that spends a fire shot
         ball.shotSweet = sweet;
+        // B + sprint curls it around the keeper
+        if(sprintHeld){
+          applyCurl(team, p, c);
+          flashStatus('¡Tiro con rosca!');
+        }
         shotRumble(team, p, power);
         shotShake(team, p, power);
         if(sweet) flashStatus('¡Golpeo perfecto!');
@@ -1191,7 +1354,10 @@
 
     } else if(team.chargeHeld){
       const power = MIN_SHOT + (MAX_SHOT - MIN_SHOT) * team.charge;
-      if(canStrike){
+      if(canStrike && sprintHeld){
+        loftedPass(team, p, team.charge);     // A + sprint clips it into the air
+        shotRumble(team, p, power * 0.6);
+      } else if(canStrike){
         // the harder you hit it, the more it counts as a shot on goal
         aimAtGoal(p, team, 0.30 + 0.32 * team.charge);
         shoot(p, power, 0.04);
@@ -1347,7 +1513,7 @@
       clampToPitch(pl);
 
       // AI ball interaction: shoot near goal, otherwise drive the ball forward
-      if(canTouch(pl) && !ballLocked(pl)){
+      if(canTouch(pl, true) && !ballLocked(pl)){
         registerTouch(team, pl);   // a change of owner hands you the controls
         const goal = opponentGoal(team);
         const distToGoal = Math.hypot(goal.x - pl.x, goal.y - pl.y);
@@ -1392,8 +1558,9 @@
   const GK_HOLD_SPACE       = 62;    // px of room opponents must give him while he holds
   const GK_RUSH_RANGE       = 340;   // how far off the line it will come
   const GK_REACH            = 70;    // lateral gap that actually justifies a dive
-  const GK_DIVE_CHANCE      = 0.88;  // even a good keeper is beaten sometimes
-  const GK_LUNGE_CHANCE     = 0.5;   // per second, when a carrier is right on top of it
+  const GK_READ_ACCURACY    = 0.74;  // how often he reads the shot instead of guessing
+  const GK_REACTION_MIN     = 0.11;  // s of reaction time before he commits to anything
+  const GK_REACTION_MAX     = 0.27;
 
   function ownGoalCentre(gk){
     return { x: gk.side === 'left' ? FIELD_MARGIN : W - FIELD_MARGIN, y: H/2 };
@@ -1523,9 +1690,11 @@
     if(gk.state === undefined){
       gk.state = 'idle'; gk.stateTimer = 0; gk.diveTarget = null;
       gk.readShot = -1; gk.shuffleY = H/2;
+      gk.reactTimer = 0; gk.reactShot = -1;
     }
     if(gk.kickCooldown > 0) gk.kickCooldown -= dt;
     if(gk.beatenTimer > 0) gk.beatenTimer -= dt;
+    if(gk.reactTimer === undefined){ gk.reactTimer = 0; gk.reactShot = -1; }
 
     const liveShot = ball.shotTimer > 0 && ball.shotSide !== gk.side;
     const ballFromGoal = Math.hypot(ball.x - goal.x, ball.y - goal.y);
@@ -1572,16 +1741,35 @@
       return;
     }
 
-    /* ---------- decide, once per shot, whether to leave the feet ---------- */
+    /* ---------- see the shot, then react to it ----------
+       He never moves before the ball is struck. On the strike he starts a
+       reaction clock, and only when that runs out does he commit — and the way
+       he commits is a guess: most of the time he reads it right, sometimes he
+       picks a side and goes the wrong way. That is what makes him beatable
+       without being bait-able. */
     if((gk.state === 'idle' || gk.state === 'shuffle' || gk.state === 'rushing') &&
-       liveShot && ball.shotId !== gk.readShot){
-      const pred = predictAtLine(gk);
-      if(pred){
-        gk.readShot = ball.shotId;
-        const targetY = Math.max(topY - 40, Math.min(botY + 40, pred.y));
+       liveShot && ball.shotId !== gk.readShot && gk.reactTimer <= 0){
+      gk.readShot = ball.shotId;
+      gk.reactTimer = GK_REACTION_MIN + Math.random() * (GK_REACTION_MAX - GK_REACTION_MIN);
+      gk.reactShot = ball.shotId;
+    }
+
+    if(gk.reactTimer > 0){
+      gk.reactTimer -= dt;
+      if(gk.reactTimer <= 0 && ball.shotTimer > 0 && ball.shotId === gk.reactShot &&
+         (gk.state === 'idle' || gk.state === 'shuffle' || gk.state === 'rushing')){
+        const pred = predictAtLine(gk);
+        let targetY;
+        if(pred && Math.random() < GK_READ_ACCURACY){
+          targetY = pred.y;                       // read it correctly
+        } else {
+          // guessed: commits to a side, which may well be the wrong one
+          const side = Math.random() < 0.5 ? -1 : 1;
+          targetY = H/2 + side * (GOAL_WIDTH * (0.28 + Math.random() * 0.26));
+        }
+        targetY = Math.max(topY - 40, Math.min(botY + 40, targetY));
         const gap = Math.abs(targetY - gk.y);
-        // only a shot he cannot simply step across to is worth a dive
-        if(gap > GK_REACH && Math.random() < GK_DIVE_CHANCE){
+        if(gap > GK_REACH){
           gk.diveTarget = { x: gk.home.x + (gk.side === 'left' ? 26 : -26), y: targetY };
           gk.state = 'diving';
           gk.stateTimer = 0;
@@ -1590,19 +1778,6 @@
           gk.state = 'shuffle';
           gk.stateTimer = 0;
         }
-      }
-    }
-
-    /* ---------- rare desperation lunge when a carrier is on top of it ------- */
-    if(gk.state === 'idle' && !liveShot && ball.heldBy === null &&
-       ballFromGoal < 190 && ballDist(gk) < 120 && gk.kickCooldown <= 0){
-      const owner = ballOwner;
-      // a smother at the ball itself, not a blind dive along the line — so even
-      // when it guesses wrong it is a challenge rather than a free goal
-      if(owner && owner.side !== gk.side && Math.random() < GK_LUNGE_CHANCE * dt){
-        gk.diveTarget = { x: ball.x, y: ball.y };
-        gk.state = 'diving';
-        gk.stateTimer = 0;
       }
     }
 
@@ -1690,7 +1865,8 @@
       ? ball.x < FIELD_MARGIN + PENALTY_BOX_DEPTH + 20
       : ball.x > W - FIELD_MARGIN - PENALTY_BOX_DEPTH - 20;
 
-    if(ballDist(gk) < gk.radius + ball.radius + 8 && gk.kickCooldown <= 0){
+    if(ballDist(gk) < gk.radius + ball.radius + 8 && ball.z <= REACH_KEEPER &&
+        gk.kickCooldown <= 0){
       const wasShot = liveShot;
 
       // A keeper getting a hand to it is not the same as holding it. The harder
@@ -1769,13 +1945,39 @@
   function updateBall(dt){
     if(ball.shotTimer > 0) ball.shotTimer -= dt;
     if(ball.releaseGuard > 0) ball.releaseGuard -= dt;
-    if(ball.heldBy){ ball.trail.length = 0; return; }   // in the keeper's hands
+    if(ball.heldBy){ ball.trail.length = 0; ball.z = 0; ball.vz = 0; return; }
+
+    // vertical flight
+    if(ball.z > 0 || ball.vz !== 0){
+      ball.z  += ball.vz * dt * 60;
+      ball.vz -= GRAVITY * dt * 60;
+      if(ball.z <= 0){
+        ball.z = 0;
+        if(ball.vz < -1.1){
+          ball.vz = -ball.vz * 0.28;   // one soft hop, then it settles
+          ballLanded();
+        } else {
+          ball.vz = 0;
+          if(ball.loftTeam) ballLanded();
+        }
+      }
+    }
     ball.x += ball.vx * dt * 60;
     ball.y += ball.vy * dt * 60;
-    ball.vx *= ball.friction;
-    ball.vy *= ball.friction;
+    const air = ball.z > 4;
+    ball.vx *= air ? 0.997 : ball.friction;
+    ball.vy *= air ? 0.997 : ball.friction;
 
-    const speed = Math.hypot(ball.vx, ball.vy);
+    let speed = Math.hypot(ball.vx, ball.vy);
+    // bend: a sideways push perpendicular to travel, fading as the ball slows
+    if(ball.curve !== 0 && speed > 1.2){
+      const nx = ball.vx / speed, ny = ball.vy / speed;
+      ball.vx += -ny * ball.curve * dt * 60;
+      ball.vy +=  nx * ball.curve * dt * 60;
+      ball.curve *= 0.995;   // holds almost all the way, so the arc closes
+      if(Math.abs(ball.curve) < 0.002) ball.curve = 0;
+      speed = Math.hypot(ball.vx, ball.vy);
+    }
     ball.spin += speed * 0.035;
     if(speed < 0.03){ ball.vx = 0; ball.vy = 0; }
 
@@ -2124,10 +2326,18 @@
       // holding a fire shot
       if(team && team.powerup === 'fire'){
         const t = performance.now() / 180;
+        const r = p.radius + 13 + Math.sin(t)*2;
         ctx.beginPath();
-        ctx.arc(0, 0, p.radius + 13 + Math.sin(t)*2, 0, Math.PI*2);
-        ctx.strokeStyle = 'rgba(255,140,40,0.9)';
+        ctx.arc(0, 0, r, 0, Math.PI*2);
+        ctx.strokeStyle = 'rgba(255,140,40,0.35)';
         ctx.lineWidth = 2.5;
+        ctx.stroke();
+        // the bright part of the ring is how much of the 15 s window is left
+        const left = Math.max(0, Math.min(1, team.powerupTimer / PU_HOLD_TIME));
+        ctx.beginPath();
+        ctx.arc(0, 0, r, -Math.PI/2, -Math.PI/2 + Math.PI*2*left);
+        ctx.strokeStyle = team.powerupTimer < 4 ? 'rgba(255,80,40,0.95)' : 'rgba(255,175,60,0.95)';
+        ctx.lineWidth = 3;
         ctx.stroke();
       }
     }
@@ -2252,14 +2462,23 @@
     }
     ctx.globalAlpha = 1;
 
-    // shadow
+    // Height is read two ways at once: the ball grows, and it pulls away from
+    // its shadow. The shadow stays on the grass, so it always tells you where
+    // the ball is actually going to come down.
+    const h      = Math.max(0, ball.z);
+    const lift   = h * 0.42;
+    const grow   = 1 + Math.min(h / 70, 1) * 0.85;
+    const shrink = 1 - Math.min(h / 90, 1) * 0.45;
+
     ctx.beginPath();
-    ctx.ellipse(ball.x + 2, ball.y + ball.radius*0.85, ball.radius*0.9, ball.radius*0.32, 0, 0, Math.PI*2);
-    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.ellipse(ball.x + 2, ball.y + ball.radius*0.85, ball.radius*0.9*shrink,
+                ball.radius*0.32*shrink, 0, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(0,0,0,' + (0.3 - Math.min(h/90,1)*0.14).toFixed(3) + ')';
     ctx.fill();
 
     ctx.save();
-    ctx.translate(ball.x, ball.y);
+    ctx.translate(ball.x, ball.y - lift);
+    ctx.scale(grow, grow);
     ctx.rotate(ball.spin);
 
     const g = ctx.createRadialGradient(-ball.radius*0.4, -ball.radius*0.4, 1, 0, 0, ball.radius*1.2);
@@ -2300,16 +2519,34 @@
   function drawCelebration(dt){
     if(!celebration) return;
     celebration.t += dt;
-    if(celebration.t > 2.0){ celebration = null; return; }
+    const dur = celebration.duration || 2.0;
+    if(celebration.t > dur){ celebration = null; return; }
     const t = celebration.t;
     const pop = t < 0.3 ? t / 0.3 : 1;
-    const fade = t > 1.6 ? 1 - (t - 1.6) / 0.4 : 1;
-    const scale = 0.6 + pop * 0.4 + Math.sin(t * 7) * 0.02;
+    const fade = t > dur - 0.4 ? 1 - (t - (dur - 0.4)) / 0.4 : 1;
+    const big = !!celebration.big;
+    const base = big ? 0.75 : 0.6;
+    const scale = (base + pop * 0.4 + Math.sin(t * 7) * 0.02) * (big ? 1.45 : 1);
+
+    // confetti rains for the winner
+    if(celebration.confetti > 0){
+      celebration.confetti -= dt;
+      for(let i = 0; i < 3; i++){
+        particles.push({
+          x: Math.random() * W, y: -12,
+          vx: (Math.random() - 0.5) * 1.6, vy: 1.4 + Math.random() * 2.2,
+          life: 4.5, maxLife: 4.5,
+          size: 5 + Math.random() * 6,
+          gravity: 0.012,
+          color: ['#f2c14e', '#ffffff', '#3aa0ff', '#ff5b3a', '#9fe870'][i % 5]
+        });
+      }
+    }
 
     ctx.save();
     ctx.globalAlpha = fade;
-    ctx.fillStyle = 'rgba(5,12,8,0.45)';
-    ctx.fillRect(0, H/2 - 110, W, 220);
+    ctx.fillStyle = big ? 'rgba(5,12,8,0.72)' : 'rgba(5,12,8,0.45)';
+    ctx.fillRect(0, big ? 0 : H/2 - 110, W, big ? H : 220);
 
     ctx.translate(W/2, H/2 - 12);
     ctx.scale(scale, scale);
@@ -2325,9 +2562,9 @@
     ctx.fillStyle = g;
     ctx.fillText(celebration.text, 0, 0);
 
-    ctx.font = '700 30px "Segoe UI", sans-serif';
-    ctx.fillStyle = 'rgba(255,255,255,0.9)';
-    ctx.fillText(celebration.sub, 0, 78);
+    ctx.font = (big ? '900 46px' : '700 30px') + ' "Segoe UI", sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+    ctx.fillText(celebration.sub, 0, big ? 96 : 78);
     ctx.restore();
     ctx.globalAlpha = 1;
   }
@@ -2374,12 +2611,16 @@
     const winner = score1 === score2 ? null : (score1 > score2 ? team1 : team2);
     flashStatus(winner ? '¡Gana el equipo ' + winner.name + '!' : '¡Empate!');
     celebration = {
-      text: winner ? 'FINAL' : 'EMPATE',
-      sub: winner ? 'Gana el equipo ' + winner.name : score1 + ' - ' + score2,
+      text: winner ? '¡GANA ' + winner.name.toUpperCase() + '!' : '¡EMPATE!',
+      sub: score1 + '  -  ' + score2,
       color: winner ? winner.color : '#f2c14e',
-      t: 0
+      t: 0,
+      big: true,          // full-screen finish
+      confetti: 4.2,      // seconds of falling confetti
+      duration: 5.0
     };
-    setTimeout(showEndOverlay, 2200);
+    shake = Math.max(shake, 14);
+    setTimeout(showEndOverlay, 5200);
   }
 
   function showEndOverlay(){
@@ -2474,9 +2715,9 @@
     drawTeam(team2);
     drawBall();
     drawPowerups();
-    drawParticles();
     drawKickoffCountdown();
     drawCelebration(paused ? 0 : dt);
+    drawParticles();   // above the celebration panel, so confetti reads on top
     if(paused) drawPauseVeil();
 
     requestAnimationFrame(gameLoop);
