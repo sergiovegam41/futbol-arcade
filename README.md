@@ -56,6 +56,8 @@ La cámara de partido no sirve para esto —desde ahí arriba la red moviéndose
 
 La red **no se abomba al marcar, sino cuando la repetición llega a ese instante**: si no, termina de rebotar antes de que lo veas. Y al llegar el balón se mantiene el plano un segundo y medio para que se vea la tela hundirse y volver.
 
+**Se puede saltar**: cualquier tecla o botón de acción corta la secuencia del gol, esté el balón todavía en la red o corriendo la repetición, y devuelve la cámara de partido. Saltando, el gol se resuelve en 0.3 s en vez de 11.
+
 **El reloj se para durante la repetición**, así que nunca te roba tiempo de partido: 2.1 segundos de jugada se ven en 5 segundos reales y el marcador del tiempo no se mueve.
 
 ## Estadio y detalle
@@ -71,7 +73,8 @@ La red **no se abomba al marcar, sino cuando la repetición llega a ese instante
 - **Gradas escalonadas.** Cuatro tribunas con muro frontal, barandilla, siete escalones que suben y se alejan, techo y pilares. 672 espectadores repartidos en las filas, mirando al campo, que se balancean solos y **saltan cuando hay gol**.
 - **Estrellas al gol.** Al marcar, el público lanza cosas desde las cuatro tribunas y caen sobre el campo.
 - **Bandera arcoíris con tela simulada.** Dos mástiles con banderas hechas de puntos y restricciones de distancia, ancladas al mástil y empujadas por un viento que va y viene.
-- **Balón texturizado** en 3D, con sus paneles, que rueda de verdad.
+- **Balón texturizado** en 3D, con sus paneles, que rueda de verdad, y con **cola de cometa** cuando va lanzado o por el aire: dieciséis fantasmas que se afinan y se apagan hacia atrás, siguiendo por dónde pasó de verdad, así que un tiro con rosca deja una estela curva. En un tiro de fuego arde de blanco a naranja.
+- **El encare se ve en la cancha:** un arco rojo bajo el jugador, abierto hacia el balón, mientras mantienes el botón.
 
 ## Modos
 

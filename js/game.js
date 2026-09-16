@@ -114,6 +114,7 @@
     if(e.repeat){ keys[e.code] = true; return; }
     keys[e.code] = true;
     if(intro.active){ skipIntro(); sfx.whistle(); return; }
+    if(replay.active || goalAction > 0){ if(skipCelebration()) return; }
     if(e.code === 'KeyQ') manualSwitch(team1);
     if(e.code === 'KeyM') manualSwitch(team2);
     if(e.code === 'KeyP' || e.code === 'Escape') togglePause();
@@ -1061,6 +1062,11 @@
     teams.forEach((team, i) => {
       const pad = readPadInput(i);
       if(pad){
+        // any action button gets you out of the intro or the goal sequence
+        if(pad.kick || pad.power || pad.pass || pad.switchBtn){
+          if(intro.active){ skipIntro(); sfx.whistle(); return; }
+          if(replay.active || goalAction > 0){ if(skipCelebration()) return; }
+        }
         if(pad.switchBtn && !padPrevSwitch[i]) manualSwitch(team);
         padPrevSwitch[i] = pad.switchBtn;
         const rMag = Math.hypot(pad.rsx, pad.rsy);
@@ -3613,6 +3619,15 @@
       ctx.fillStyle = 'rgba(255,225,150,0.95)';
       ctx.fillText(replay.scorer, W - 40, bar / 2);
     }
+    {
+      ctx.save();
+      ctx.globalAlpha = 0.5 + 0.3 * Math.sin(replay.t * 5);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.font = '600 17px "Segoe UI", sans-serif';
+      ctx.fillText('pulsa para saltar', W/2, bar / 2);
+      ctx.restore();
+    }
 
     // a progress bar along the bottom letterbox
     const pw = W * 0.4, px = (W - pw) / 2, py = H - bar / 2;
@@ -3636,6 +3651,28 @@
     if(!view3d || !g3.ready){ intro.active = false; return; }
     intro.active = true;
     intro.t = 0;
+  }
+
+  // Skipping the whole goal sequence: the ball still in the net, the replay,
+  // or both. One gesture, so you never have to sit through a celebration you
+  // have already seen.
+  function skipCelebration(){
+    if(replay.active){
+      replay.active = false;
+      resetPositions();
+      kickoffTimer = 1.2;
+      restoreMatchCamera();
+      return true;
+    }
+    if(goalAction > 0){
+      goalAction = 0;
+      pendingGoal = null;
+      celebration = null;
+      resetPositions();
+      kickoffTimer = 1.2;
+      return true;
+    }
+    return false;
   }
 
   function skipIntro(){
@@ -4408,6 +4445,85 @@
     return g;
   }
 
+  /* ---- ball trail ----
+     A comet tail behind the ball: a string of ghosts that shrink and fade the
+     further back they are, sampled from where the ball actually was rather than
+     smeared along its current heading, so a curled shot leaves a curved tail.
+     Only shows when the ball is genuinely moving or in the air — a ball being
+     dribbled should not have a tail. */
+  const TRAIL_N = 16;
+  function buildBallTrail(){
+    const ghosts = [];
+    for(let i = 0; i < TRAIL_N; i++){
+      const k = i / TRAIL_N;
+      const m = new THREE.Mesh(
+        new THREE.SphereGeometry(ball.radius * S3 * (1 - k * 0.72), 8, 6),
+        new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true,
+                                      opacity: 0.42 * (1 - k), depthWrite: false })
+      );
+      m.visible = false;
+      g3.scene.add(m);
+      ghosts.push(m);
+    }
+    return { ghosts, hist: [] };
+  }
+
+  function updateBallTrail(){
+    const t = g3.trail;
+    if(!t) return;
+    const speed = Math.hypot(ball.vx, ball.vy);
+    const show  = speed > 5.5 || ball.z > 8;
+
+    t.hist.unshift({ x: wx(ball.x),
+                     y: Math.max(0, ball.z) * S3 + ball.radius * S3,
+                     z: wz(ball.y) });
+    if(t.hist.length > TRAIL_N * 2 + 2) t.hist.pop();
+
+    const fire = ball.shotFire && ball.shotTimer > 0;
+    for(let i = 0; i < TRAIL_N; i++){
+      const g = t.ghosts[i];
+      const h = t.hist[i * 2 + 1];
+      if(!show || !h){ g.visible = false; continue; }
+      g.visible = true;
+      g.position.set(h.x, h.y, h.z);
+      // a fire shot burns from white at the ball to deep orange at the tail
+      const k = i / TRAIL_N;
+      g.material.color.setRGB(fire ? 1 : 1,
+                              fire ? 1 - k * 0.45 : 1,
+                              fire ? 0.55 - k * 0.5 : 1);
+      g.material.opacity = (fire ? 0.6 : 0.42) * (1 - k);
+    }
+  }
+
+  /* ---- containing, shown on the grass ----
+     The top-down view has had a red wedge for this for a while. In 3D there was
+     nothing, so you could not tell whether the button had taken. */
+  function buildContainMark(){
+    const m = new THREE.Mesh(
+      new THREE.RingGeometry(1.4, 2.4, 26, 1, -0.75, 1.5),
+      new THREE.MeshBasicMaterial({ color: 0xff6a4a, side: THREE.DoubleSide,
+                                    transparent: true, opacity: 0.85,
+                                    depthWrite: false })
+    );
+    m.rotation.x = -Math.PI / 2;
+    m.visible = false;
+    g3.scene.add(m);
+    return m;
+  }
+
+  function updateContainMarks(){
+    if(!g3.contain) return;
+    for(const team of teams){
+      const mark = g3.contain[team.isP1 ? 0 : 1];
+      if(!team.containing){ mark.visible = false; continue; }
+      const p = getControlled(team);
+      mark.visible = true;
+      mark.position.set(wx(p.x), 0.06, wz(p.y));
+      // the arc opens towards the ball, which is where he is facing
+      mark.rotation.z = -Math.atan2(wz(ball.y) - wz(p.y), wx(ball.x) - wx(p.x));
+    }
+  }
+
   function makePlayerMesh(p){
     const group = new THREE.Group();
     const col   = new THREE.Color(p.role === 'GK' ? '#f3f5f0' : p.color);
@@ -4555,6 +4671,8 @@
     g3.scene.add(g3.ballShadow);
 
     g3.bars = [buildPowerBar(), buildPowerBar()];
+    g3.trail = buildBallTrail();
+    g3.contain = [buildContainMark(), buildContainMark()];
     buildFloodlights();
     buildStands();
     g3.cheer = buildCheerBits();
@@ -4629,6 +4747,8 @@
     for(const n of g3.nets3d) updateNet3d(n);
     updateCrowd(dt, now);
     updatePowerBars();
+    updateBallTrail();
+    updateContainMarks();
     updateCheerBits(dt);
     if(g3.flags) for(const fl of g3.flags) updateFlag(fl, dt, now);
 
