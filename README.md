@@ -16,6 +16,21 @@ Los jugadores son formas simples (cuerpo, cabeza y una cuña que marca hacia dó
 
 Si three.js no carga, el botón lo dice y el juego se queda en 2D: la página nunca depende del CDN para ser jugable.
 
+## Partido nocturno e iluminación
+
+La vista 3D es un partido de noche, y la luz es lo que la sostiene:
+
+- **Sombras reales.** Un mapa de 2048px cubre todo el campo. Jugadores, balón y postes proyectan sombra sobre el césped — sin eso las figuras parecen pegadas encima del campo en vez de apoyadas en él.
+- **Cuatro torres de luz** en las esquinas, con su rejilla de seis focos, halo y un cono cálido que ilumina su zona del campo. Las esquinas quedan más brillantes que el centro, como en un estadio de verdad.
+- **Luz principal cálida más relleno frío** desde el lado opuesto, para que las caras en sombra no queden negras del todo.
+- **Corrección de color sRGB y tono ACES**, que es lo que evita que los colores saturados se quemen.
+
+## Repetición del gol
+
+Cada frame de juego se guarda en un búfer circular (solo posiciones). Al marcar, el partido se congela y se repiten los últimos segundos **a cámara lenta**, con letterbox, el piloto rojo de REC y el nombre del goleador.
+
+**El reloj se para durante la repetición**, así que nunca te roba tiempo de partido: 2.1 segundos de jugada se ven en 5 segundos reales y el marcador del tiempo no se mueve.
+
 ## Estadio y detalle
 
 - **Plantillas con nombre.** Cada jugador se llama algo: KK, Penélope, El Tanque, Pantufla, Don Cangrejo… Los arqueros tienen su propio bombo de nombres (Manotas, El Muro, Palomita). Se reparten sin repetir al empezar, salen sobre la cabeza y **el gol anuncia al goleador** — o al del gol en propia, que también se reconoce.

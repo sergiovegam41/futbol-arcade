@@ -617,8 +617,14 @@
         color: ['#f2c14e', '#ffffff', team.color, '#9fd6ac'][i % 4]
       });
     }
-    kickoffTimer = 1.8;
-    resetPositions();
+    // the replay holds the freeze; if there is no history yet, carry on as before
+    const scorerName = who ? (own ? who + ' (en propia)' : who) : null;
+    if(startReplay(netSide, scorerName)){
+      kickoffTimer = 0;
+    } else {
+      kickoffTimer = 1.8;
+      resetPositions();
+    }
   }
 
   function updateScore(bumpEl){
@@ -3060,6 +3066,123 @@
   }
 
   /* =========================================================
+     Instant replay
+     Every frame of play is written into a ring buffer — just the positions,
+     nothing else. When somebody scores, the match freezes and the last few
+     seconds are played back in slow motion with a camera that swings around
+     the goal. The clock is paused while it runs, so a replay never eats match
+     time; it only costs you real seconds.
+     ========================================================= */
+  const REPLAY_SECS   = 5.0;    // how much history we keep
+  const REPLAY_SHOW   = 3.4;    // how much of it we show
+  const REPLAY_SPEED  = 0.42;   // slow motion factor
+  const REPLAY_FPS    = 60;
+  const REPLAY_FRAMES = Math.ceil(REPLAY_SECS * REPLAY_FPS);
+  const REPLAY_STRIDE = 10 * 4 + 4;   // 10 players (x,y,fx,fy) + ball (x,y,z,spin)
+
+  const replay = {
+    buf: new Float32Array(REPLAY_FRAMES * REPLAY_STRIDE),
+    count: 0, head: 0,
+    active: false, t: 0, span: 0, side: null, scorer: null
+  };
+
+  function recordFrame(){
+    const list = allPlayers();
+    let k = replay.head * REPLAY_STRIDE;
+    const b = replay.buf;
+    for(let i = 0; i < 10; i++){
+      const p = list[i];
+      b[k++] = p.x; b[k++] = p.y; b[k++] = p.facing.x; b[k++] = p.facing.y;
+    }
+    b[k++] = ball.x; b[k++] = ball.y; b[k++] = ball.z; b[k++] = ball.spin;
+    replay.head = (replay.head + 1) % REPLAY_FRAMES;
+    if(replay.count < REPLAY_FRAMES) replay.count++;
+  }
+
+  // age 0 = the newest frame, age N = N frames ago
+  function applyFrame(age){
+    const n = replay.count;
+    if(!n) return;
+    const a = Math.max(0, Math.min(n - 1, age));
+    const i0 = Math.floor(a), i1 = Math.min(n - 1, i0 + 1);
+    const f = a - i0;
+    const idx = (o) => ((replay.head - 1 - o) % REPLAY_FRAMES + REPLAY_FRAMES) % REPLAY_FRAMES;
+    const b = replay.buf;
+    const p0 = idx(i0) * REPLAY_STRIDE, p1 = idx(i1) * REPLAY_STRIDE;
+    const mix = (o) => b[p0 + o] + (b[p1 + o] - b[p0 + o]) * f;
+
+    const list = allPlayers();
+    for(let i = 0; i < 10; i++){
+      const p = list[i], o = i * 4;
+      p.x = mix(o); p.y = mix(o + 1);
+      p.facing.x = mix(o + 2); p.facing.y = mix(o + 3);
+      p.vx = 0; p.vy = 0;
+    }
+    ball.x = mix(40); ball.y = mix(41); ball.z = mix(42); ball.spin = mix(43);
+    ball.vx = 0; ball.vy = 0; ball.vz = 0;
+  }
+
+  function startReplay(side, scorer){
+    if(replay.count < 30) return false;
+    replay.active = true;
+    replay.t = 0;
+    replay.span = Math.min(REPLAY_SHOW, replay.count / REPLAY_FPS);
+    replay.side = side;
+    replay.scorer = scorer;
+    return true;
+  }
+
+  function updateReplay(dt){
+    replay.t += dt * REPLAY_SPEED;
+    if(replay.t >= replay.span){
+      replay.active = false;
+      resetPositions();
+      kickoffTimer = 1.2;
+      return;
+    }
+    // walk from the oldest shown frame towards the newest
+    const age = (replay.span - replay.t) * REPLAY_FPS;
+    applyFrame(age);
+  }
+
+  function drawReplayFrame(){
+    // letterbox and a label, so nobody mistakes it for live play
+    const bar = H * 0.085;
+    ctx.fillStyle = 'rgba(0,0,0,0.82)';
+    ctx.fillRect(0, 0, W, bar);
+    ctx.fillRect(0, H - bar, W, bar);
+
+    const blink = 0.55 + 0.45 * Math.abs(Math.sin(replay.t * 4));
+    ctx.save();
+    ctx.globalAlpha = blink;
+    ctx.fillStyle = '#ff4d4d';
+    ctx.beginPath();
+    ctx.arc(62, bar / 2, 9, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+    ctx.font = '800 26px "Segoe UI", sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('REPETICIÓN', 84, bar / 2);
+
+    if(replay.scorer){
+      ctx.textAlign = 'right';
+      ctx.fillStyle = 'rgba(255,225,150,0.95)';
+      ctx.fillText(replay.scorer, W - 40, bar / 2);
+    }
+
+    // a progress bar along the bottom letterbox
+    const pw = W * 0.4, px = (W - pw) / 2, py = H - bar / 2;
+    ctx.fillStyle = 'rgba(255,255,255,0.22)';
+    ctx.fillRect(px, py - 2, pw, 4);
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+    ctx.fillRect(px, py - 2, pw * Math.min(1, replay.t / replay.span), 4);
+    ctx.textAlign = 'center';
+  }
+
+  /* =========================================================
      3D view
      The simulation is untouched: it keeps running in its own 1600x900 pitch
      coordinates and this is purely a second way of LOOKING at it. Game (x, y)
@@ -3383,6 +3506,95 @@
     cb.geo.attributes.position.needsUpdate = true;
   }
 
+  /* ---- stadium lighting ----
+     A night match: four masts throwing warm pools onto the grass, one of them
+     doubling as the key light that actually casts the shadows, and a dim cool
+     ambient so nothing ever goes pure black. Shadows are what sell it — without
+     them the players look pasted onto the pitch instead of standing on it. */
+  function buildLighting(){
+    // base fill: cool sky bounce, dark ground bounce
+    const hemi = new THREE.HemisphereLight(0x9fc8dd, 0x0d2416, 0.40);
+    g3.scene.add(hemi);
+
+    // the key light: one shadow map for the whole pitch
+    const key = new THREE.DirectionalLight(0xfff0cf, 0.75);
+    key.position.set(34, 74, 44);
+    key.castShadow = true;
+    key.shadow.mapSize.width  = 2048;
+    key.shadow.mapSize.height = 2048;
+    const span = (W * S3) * 0.62;
+    key.shadow.camera.left   = -span;
+    key.shadow.camera.right  =  span;
+    key.shadow.camera.top    =  span;
+    key.shadow.camera.bottom = -span;
+    key.shadow.camera.near   = 10;
+    key.shadow.camera.far    = 190;
+    key.shadow.bias = -0.0012;
+    key.shadow.normalBias = 0.03;
+    g3.scene.add(key);
+    g3.keyLight = key;
+
+    // a soft bounce from the opposite side so shadowed faces are not flat black
+    const fill = new THREE.DirectionalLight(0xbcd8ff, 0.22);
+    fill.position.set(-40, 42, -50);
+    g3.scene.add(fill);
+
+    return { hemi, key, fill };
+  }
+
+  /* ---- floodlight masts ----
+     Four towers with lit heads and a warm pool of light under each, so the
+     pitch has bright corners and a slightly dimmer middle, like a real ground. */
+  function buildFloodlights(){
+    const halfW3 = (W * S3) / 2 + 14;
+    const halfH3 = (H * S3) / 2 + 11;
+    const corners = [[ halfW3, halfH3], [-halfW3, halfH3],
+                     [ halfW3,-halfH3], [-halfW3,-halfH3]];
+    const mastMat = new THREE.MeshLambertMaterial({ color: 0x38434c });
+    const lampMat = new THREE.MeshBasicMaterial({ color: 0xfff6d8 });
+
+    for(const c of corners){
+      const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.8, 36, 8), mastMat);
+      mast.position.set(c[0], 18, c[1]);
+      mast.castShadow = false;
+      g3.scene.add(mast);
+
+      // the rig of lamps at the top
+      const rig = new THREE.Group();
+      for(let i = 0; i < 6; i++){
+        const lamp = new THREE.Mesh(new THREE.BoxGeometry(2.0, 1.5, 0.7), lampMat);
+        lamp.position.set((i % 3 - 1) * 2.3, Math.floor(i / 3) * 1.8, 0);
+        rig.add(lamp);
+      }
+      rig.position.set(c[0], 35, c[1]);
+      rig.lookAt(0, 0, 0);
+      g3.scene.add(rig);
+
+      // halo so the rig reads as lit from across the pitch
+      const halo = new THREE.Mesh(
+        new THREE.SphereGeometry(4.6, 10, 8),
+        new THREE.MeshBasicMaterial({ color: 0xfff0b8, transparent: true, opacity: 0.13 })
+      );
+      halo.position.set(c[0], 35.5, c[1]);
+      g3.scene.add(halo);
+
+      // the pool of light it throws — no shadow map, just colour and falloff
+      const spot = new THREE.SpotLight(0xfff2d2, 0.55, 210, Math.PI / 5.2, 0.55, 1.4);
+      spot.position.set(c[0], 35, c[1]);
+      spot.target.position.set(c[0] * 0.28, 0, c[1] * 0.28);
+      g3.scene.add(spot);
+      g3.scene.add(spot.target);
+    }
+  }
+
+  // shadows are only worth their cost on the things you actually watch
+  function enableShadows(obj, cast, receive){
+    if(!obj) return;
+    obj.castShadow = !!cast;
+    obj.receiveShadow = !!receive;
+    if(obj.children) for(const c of obj.children) enableShadows(c, cast, receive);
+  }
+
   function makePlayerMesh(p){
     const group = new THREE.Group();
     const col   = new THREE.Color(p.role === 'GK' ? '#f3f5f0' : p.color);
@@ -3437,17 +3649,21 @@
     if(g3.ready || !has3d()) return;
 
     g3.renderer = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: true });
-    g3.renderer.setClearColor(0x07120c, 1);
+    g3.renderer.setClearColor(0x050a12, 1);
+    g3.renderer.shadowMap.enabled = true;
+    g3.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    if(THREE.sRGBEncoding !== undefined) g3.renderer.outputEncoding = THREE.sRGBEncoding;
+    if(THREE.ACESFilmicToneMapping !== undefined){
+      g3.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      g3.renderer.toneMappingExposure = 1.12;
+    }
 
     g3.scene = new THREE.Scene();
-    g3.scene.fog = new THREE.Fog(0x07120c, 120, 260);
+    g3.scene.fog = new THREE.Fog(0x050a12, 130, 300);
 
     g3.camera = new THREE.PerspectiveCamera(42, 16/9, 1, 500);
 
-    g3.scene.add(new THREE.HemisphereLight(0xcfe9d4, 0x16301f, 0.95));
-    const sun = new THREE.DirectionalLight(0xffffff, 0.65);
-    sun.position.set(30, 90, 40);
-    g3.scene.add(sun);
+    g3.lights = buildLighting();
 
     // the pitch: the very same canvas the 2D view draws its lines on
     if(!fieldCache) buildFieldCache();
@@ -3458,6 +3674,7 @@
       new THREE.MeshLambertMaterial({ map: tex })
     );
     pitch.rotation.x = -Math.PI / 2;
+    pitch.receiveShadow = true;
     g3.scene.add(pitch);
     g3.pitchTex = tex;
 
@@ -3468,6 +3685,7 @@
     );
     surround.rotation.x = -Math.PI / 2;
     surround.position.y = -0.15;
+    surround.receiveShadow = true;
     g3.scene.add(surround);
 
     // goal frames
@@ -3488,6 +3706,7 @@
       // side panels, so the goal reads as a box from any angle
       [[-1, 1]].forEach(function(){});
       frame.position.x = wx(gx);
+      enableShadows(frame, true, false);   // posts and bar drop shadows on the grass
       g3.scene.add(frame);
       // the back of the net is simulated cloth, built in world space
       g3.nets3d.push(buildNet3d(gx === FIELD_MARGIN ? 'left' : 'right', wx(gx), dir));
@@ -3496,6 +3715,7 @@
     // players and ball
     g3.players = allPlayers().map(p => {
       const m = makePlayerMesh(p);
+      enableShadows(m, true, false);
       g3.scene.add(m);
       return { p, m };
     });
@@ -3504,6 +3724,7 @@
       new THREE.SphereGeometry(ball.radius * S3, 20, 16),
       new THREE.MeshLambertMaterial({ map: ballTexture() })
     );
+    g3.ball.castShadow = true;
     g3.scene.add(g3.ball);
 
     // a blob on the grass under the ball, so height stays readable
@@ -3514,6 +3735,7 @@
     g3.ballShadow.rotation.x = -Math.PI / 2;
     g3.scene.add(g3.ballShadow);
 
+    buildFloodlights();
     buildCrowd();
     g3.cheer = buildCheerBits();
     g3.flags = [
@@ -3675,6 +3897,7 @@
 
     resolveAllCollisions();
     updateBall(dt);
+    recordFrame();
     goalCheck();
 
     // control always sits with whoever has the ball
@@ -3691,7 +3914,9 @@
     const dt = Math.min((ts - lastTs) / 1000, 0.05);
     lastTs = ts;
 
-    if(running && !paused){
+    if(running && !paused && replay.active){
+      updateReplay(dt);
+    } else if(running && !paused){
       step(dt);
       hudTimer += dt;
       if(hudTimer > 0.5){ hudTimer = 0; updatePossessionHud(); }
@@ -3719,6 +3944,7 @@
       drawKickoffCountdown();
       drawCelebration(paused ? 0 : dt);
       if(celebration && celebration.big) drawParticles();   // final confetti
+      if(replay.active) drawReplayFrame();
       if(paused) drawPauseVeil();
     } else {
       ctx.drawImage(fieldCache, 0, 0, W, H);
@@ -3730,6 +3956,7 @@
       drawKickoffCountdown();
       drawCelebration(paused ? 0 : dt);
       drawParticles();   // above the celebration panel, so confetti reads on top
+      if(replay.active) drawReplayFrame();
       if(paused) drawPauseVeil();
     }
 
@@ -3817,6 +4044,7 @@
     particles.length = 0;
     resetPowerups();
     resetNets();
+    replay.count = 0; replay.head = 0; replay.active = false;
     celebration = null;
     kickoffTimer = 1.2;
     updateScore(null);
