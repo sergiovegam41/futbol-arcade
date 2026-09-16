@@ -77,7 +77,7 @@
      ========================================================= */
   const FIELD_MARGIN      = 46;
   const GOAL_WIDTH        = 220;
-  const GOAL_DEPTH        = 32;
+  const GOAL_DEPTH        = 62;   // ~2 m against a 7.3 m mouth, like a real goal
   const PENALTY_BOX_DEPTH = 150;
   const PENALTY_BOX_WIDTH = GOAL_WIDTH + 200;
   const GOAL_AREA_DEPTH   = 62;
@@ -167,14 +167,125 @@
   });
 
   /* =========================================================
+     Crowd ambience
+     Synthesised, not sampled. A recorded crowd would be a megabyte of audio to
+     download, licence and cache, and it would loop audibly; this is a few lines
+     of Web Audio that never repeats and weighs nothing.
+
+     Two layers: a low murmur that is always there, and a brighter "oooh" layer
+     that only opens up as the ball gets near a goal. Excitement drives the gain
+     and the filter, so the ground lifts when an attack builds and settles back
+     when it breaks down.
+     ========================================================= */
+  const amb = { on:false, noise:null, murmur:null, murmurGain:null,
+                cheer:null, cheerGain:null, excite:0, target:0 };
+
+  function makeNoiseBuffer(ctx, secs){
+    const len = Math.floor(ctx.sampleRate * secs);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    // brown-ish noise: closer to a crowd than white, which hisses
+    let last = 0;
+    for(let i = 0; i < len; i++){
+      const w = Math.random() * 2 - 1;
+      last = (last + 0.02 * w) / 1.02;
+      d[i] = last * 3.2;
+    }
+    return buf;
+  }
+
+  function startAmbience(){
+    if(amb.on || !audioCtx) return;
+    const buf = makeNoiseBuffer(audioCtx, 4);
+
+    // layer 1: the constant murmur
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf; src.loop = true;
+    const lp = audioCtx.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = 520; lp.Q.value = 0.6;
+    const g1 = audioCtx.createGain();
+    g1.gain.value = 0;
+    src.connect(lp).connect(g1).connect(audioCtx.destination);
+    src.start();
+
+    // layer 2: the excited one, brighter and only audible when something is on
+    const src2 = audioCtx.createBufferSource();
+    src2.buffer = buf; src2.loop = true; src2.playbackRate.value = 1.27;
+    const bp = audioCtx.createBiquadFilter();
+    bp.type = 'bandpass'; bp.frequency.value = 900; bp.Q.value = 0.9;
+    const g2 = audioCtx.createGain();
+    g2.gain.value = 0;
+    src2.connect(bp).connect(g2).connect(audioCtx.destination);
+    src2.start();
+
+    amb.on = true;
+    amb.murmur = lp; amb.murmurGain = g1;
+    amb.cheer = bp;  amb.cheerGain = g2;
+  }
+
+  // How interesting is the game right now? Mostly: how close is the ball to
+  // either goal, plus a kick whenever something actually happens.
+  function ambienceTarget(){
+    if(!running || paused) return 0.12;
+    const dLeft  = Math.hypot(ball.x - FIELD_MARGIN, ball.y - H/2);
+    const dRight = Math.hypot(ball.x - (W - FIELD_MARGIN), ball.y - H/2);
+    const near   = Math.min(dLeft, dRight);
+    // 0 out by the halfway line, 1 in the six-yard box
+    const prox = clamp01((760 - near) / 620);
+    const shot = ball.shotTimer > 0 ? 0.25 : 0;
+    return Math.min(1, 0.18 + prox * 0.75 + shot);
+  }
+
+  function updateAmbience(dt){
+    if(!amb.on || !audioCtx) return;
+    if(!soundOn){
+      amb.murmurGain.gain.value = 0;
+      amb.cheerGain.gain.value = 0;
+      return;
+    }
+    amb.target = Math.max(ambienceTarget(), crowdCheerT > 0 ? 1 : 0);
+    // rises quickly, falls slowly — a crowd goes up fast and takes its time
+    const rate = amb.target > amb.excite ? 2.6 : 0.7;
+    amb.excite += (amb.target - amb.excite) * Math.min(1, dt * rate);
+
+    const e = amb.excite;
+    amb.murmurGain.gain.value = 0.035 + e * 0.05;
+    amb.cheerGain.gain.value  = Math.max(0, e - 0.35) * 0.115;
+    amb.murmur.frequency.value = 480 + e * 340;
+    amb.cheer.frequency.value  = 820 + e * 620;
+  }
+
+  // the roar when one goes in
+  function crowdRoar(){
+    if(!soundOn || !audioCtx) return;
+    const t = audioCtx.currentTime;
+    const src = audioCtx.createBufferSource();
+    src.buffer = makeNoiseBuffer(audioCtx, 2.6);
+    const bp = audioCtx.createBiquadFilter();
+    bp.type = 'bandpass'; bp.frequency.setValueAtTime(700, t);
+    bp.frequency.exponentialRampToValueAtTime(1500, t + 0.35);
+    bp.Q.value = 0.8;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.30, t + 0.22);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 2.4);
+    src.connect(bp).connect(g).connect(audioCtx.destination);
+    src.start(t);
+    src.stop(t + 2.6);
+  }
+
+  /* =========================================================
      Teams — GK + 2 DEF + 2 FWD
      ========================================================= */
   const SQUAD = [
     { role:'DEF', slot:-1, number:4  },
     { role:'DEF', slot: 1, number:5  },
+    { role:'MID', slot:-1, number:8  },
+    { role:'MID', slot: 1, number:6  },
     { role:'FWD', slot:-1, number:9  },
     { role:'FWD', slot: 1, number:11 }
   ];
+  const SQUAD_TOTAL = 2 * (SQUAD.length + 1);   // both sides, keepers included
 
   // slot: -1 = upper lane, +1 = lower lane
   function formationHome(role, slot, side){
@@ -182,8 +293,9 @@
     const lane = 165;
     switch(role){
       case 'GK':  x = FIELD_MARGIN + 30;                                  y = H/2; break;
-      case 'DEF': x = FIELD_MARGIN + (halfW - FIELD_MARGIN) * 0.34;       y = H/2 + slot * lane; break;
-      case 'FWD': x = FIELD_MARGIN + (halfW - FIELD_MARGIN) * 0.86;       y = H/2 + slot * (lane + 35); break;
+      case 'DEF': x = FIELD_MARGIN + (halfW - FIELD_MARGIN) * 0.30;       y = H/2 + slot * lane; break;
+      case 'MID': x = FIELD_MARGIN + (halfW - FIELD_MARGIN) * 0.62;       y = H/2 + slot * (lane + 60); break;
+      case 'FWD': x = FIELD_MARGIN + (halfW - FIELD_MARGIN) * 0.92;       y = H/2 + slot * (lane - 20); break;
     }
     if(side === 'right') x = W - x;
     return {x, y};
@@ -194,7 +306,7 @@
     return {
       x: home.x, y: home.y, vx:0, vy:0,
       color, side, role, slot, number,
-      radius: role === 'GK' ? 16 : 18,
+      radius: role === 'GK' ? 15 : 16,
       speed:  role === 'GK' ? 2.6 : 2.95,
       sprintMult: 1.62,
       kickCooldown: 0,
@@ -267,7 +379,7 @@
   }
 
   const ball = {
-    x: W/2, y: H/2, vx:0, vy:0, radius:11,
+    x: W/2, y: H/2, vx:0, vy:0, radius:10,
     friction:0.986, spin:0, trail:[],
     // a real strike, as opposed to a dribble touch: this is what the keeper reads
     shotTimer:0, shotSide:null, shotId:0, heldBy:null, shotPower:0, shotSweet:false, shotFire:false, shotDist:0,
@@ -720,6 +832,7 @@
   }
 
   function goalCheck(){
+    if(pendingGoal) return false;   // already inside, let it play out
     // left goal — red scores
     // under the bar and between the posts, or it is not a goal
     const underBar = ball.z < GOAL_H_PX;
@@ -733,49 +846,74 @@
     return false;
   }
 
+  /* ---- the goal itself ----
+     Crossing the line used to end the play instantly: the ball vanished mid-air
+     and the celebration cut over it. Now the whistle is held for a moment while
+     the ball keeps living inside the goal — it carries on into the net, punches
+     the cloth, drops and rolls — and only then does the celebration and the
+     replay take over. The clock is stopped for the whole of it. */
+  const GOAL_ACTION = 1.35;      // seconds the ball is allowed to live in the net
+  let goalAction = 0;
+  let pendingGoal = null;
+
   function onGoal(team, netSide){
     updateScore(team.isP1 ? score1El : score2El);
-
-    // the net takes the hit before anything is reset, so the bulge matches
-    // the shot that actually went in
-    const speed = Math.hypot(ball.vx, ball.vy);
-    const hitY = ball.y, hitZ = ball.z;
 
     // whoever touched it last gets the credit — or the blame
     const toucher = ballOwner;
     const own  = toucher && toucher.side !== team.side;
     const who  = toucher ? (toucher.name || ('#' + toucher.number)) : null;
-    const line = !who ? ('Equipo ' + team.name)
-               : own  ? ('en propia de ' + who)
-                      : ('de ' + who);
-    flashStatus(own ? ('¡Gol en propia de ' + who + '!') : ('¡GOL ' + line + '!'));
-    celebration = { text: own ? '¡EN PROPIA!' : '¡GOOOL!', sub: line,
-                    color: team.color, t:0 };
+
+    pendingGoal = {
+      team, netSide, own, who,
+      speed: Math.hypot(ball.vx, ball.vy),
+      hitY: ball.y, hitZ: ball.z
+    };
+    goalAction = GOAL_ACTION;
+
+    // the crowd and the shake go off NOW — they are reacting to the ball
+    // crossing, not to the replay
     shake = 16;
     sfx.goal();
-    crowdCheer(2.4);
+    crowdRoar();
+    crowdCheer(3.2);
+    flashStatus(own ? ('¡Gol en propia de ' + who + '!')
+                    : ('¡GOL ' + (who ? 'de ' + who : 'del equipo ' + team.name) + '!'));
+  }
+
+  // called once the ball has finished its business inside the net
+  function finishGoal(){
+    const g = pendingGoal;
+    pendingGoal = null;
+    if(!g) return;
+
+    const line = !g.who ? ('Equipo ' + g.team.name)
+               : g.own  ? ('en propia de ' + g.who)
+                        : ('de ' + g.who);
+    celebration = { text: g.own ? '¡EN PROPIA!' : '¡GOOOL!', sub: line,
+                    color: g.team.color, t: 0 };
     if(g3.ready) throwCheerBits();
-    // confetti burst from the goal mouth
-    const gx = team.side === 'left' ? W - FIELD_MARGIN : FIELD_MARGIN;
+    const gx = g.team.side === 'left' ? W - FIELD_MARGIN : FIELD_MARGIN;
     for(let i = 0; i < 70; i++){
       spawnParticles(gx, H/2, 1, {
         speed: 9, life: 1.4, size: 6, gravity: 0.09,
-        color: ['#f2c14e', '#ffffff', team.color, '#9fd6ac'][i % 4]
+        color: ['#f2c14e', '#ffffff', g.team.color, '#9fd6ac'][i % 4]
       });
     }
-    // the replay holds the freeze; if there is no history yet, carry on as before
-    const scorerName = who ? (own ? who + ' (en propia)' : who) : null;
-    if(startReplay(netSide, scorerName, speed, hitY, hitZ)){
+
+    const scorerName = g.who ? (g.own ? g.who + ' (en propia)' : g.who) : null;
+    if(startReplay(g.netSide, scorerName, g.speed, g.hitY, g.hitZ)){
       // the net is punched when the REPLAY reaches the moment of impact, not
-      // now — otherwise it has finished bouncing before you get to see it
+      // when the goal is given — otherwise it has finished bouncing by then
       resetNets();
       kickoffTimer = 0;
     } else {
-      if(netSide) netImpulse(netSide, hitY, hitZ, speed);
       kickoffTimer = 1.8;
       resetPositions();
     }
   }
+
+
 
   function updateScore(bumpEl){
     score1El.textContent = score1;
@@ -966,8 +1104,13 @@
   // your own half you are cycling defenders. It matches what you are trying to
   // do in each phase instead of handing you whoever happens to be closest.
   function switchLine(team){
-    const ownHalf = team.side === 'left' ? ball.x < halfW : ball.x > halfW;
-    return ownHalf ? 'DEF' : 'FWD';
+    // three bands now: your own third defends, the middle belongs to the
+    // midfielders, the last third is for the strikers
+    const f = team.side === 'left' ? (ball.x - FIELD_MARGIN) / (W - FIELD_MARGIN*2)
+                                   : 1 - (ball.x - FIELD_MARGIN) / (W - FIELD_MARGIN*2);
+    if(f < 0.36) return 'DEF';
+    if(f < 0.68) return 'MID';
+    return 'FWD';
   }
 
   function switchPool(team){
@@ -1950,8 +2093,8 @@
   /* =========================================================
      Team shape + "everybody runs when you run"
      ========================================================= */
-  const AI_PULL       = { DEF:{x:0.20, y:0.34}, FWD:{x:0.40, y:0.46} };
-  const ROLE_ADVANCE  = { DEF:0.62, FWD:1.25 };
+  const AI_PULL       = { DEF:{x:0.20, y:0.34}, MID:{x:0.34, y:0.44}, FWD:{x:0.42, y:0.46} };
+  const ROLE_ADVANCE  = { DEF:0.62, MID:0.95, FWD:1.28 };
   const MAX_ADVANCE   = 150;
   const ADVANCE_SMOOTH= 1.7;
   const SPRINT_RAMP   = 4.5;   // how fast teammates pick up the pace
@@ -3352,7 +3495,7 @@
   const REPLAY_SPEED  = 0.42;   // slow motion factor
   const REPLAY_FPS    = 60;
   const REPLAY_FRAMES = Math.ceil(REPLAY_SECS * REPLAY_FPS);
-  const REPLAY_STRIDE = 10 * 4 + 4;   // 10 players (x,y,fx,fy) + ball (x,y,z,spin)
+  const REPLAY_STRIDE = SQUAD_TOTAL * 4 + 4;   // players (x,y,fx,fy) + ball (x,y,z,spin)
 
   const replay = {
     buf: new Float32Array(REPLAY_FRAMES * REPLAY_STRIDE),
@@ -3365,7 +3508,7 @@
     const list = allPlayers();
     let k = replay.head * REPLAY_STRIDE;
     const b = replay.buf;
-    for(let i = 0; i < 10; i++){
+    for(let i = 0; i < SQUAD_TOTAL; i++){
       const p = list[i];
       b[k++] = p.x; b[k++] = p.y; b[k++] = p.facing.x; b[k++] = p.facing.y;
     }
@@ -3387,13 +3530,14 @@
     const mix = (o) => b[p0 + o] + (b[p1 + o] - b[p0 + o]) * f;
 
     const list = allPlayers();
-    for(let i = 0; i < 10; i++){
+    for(let i = 0; i < SQUAD_TOTAL; i++){
       const p = list[i], o = i * 4;
       p.x = mix(o); p.y = mix(o + 1);
       p.facing.x = mix(o + 2); p.facing.y = mix(o + 3);
       p.vx = 0; p.vy = 0;
     }
-    ball.x = mix(40); ball.y = mix(41); ball.z = mix(42); ball.spin = mix(43);
+    const bo = SQUAD_TOTAL * 4;
+    ball.x = mix(bo); ball.y = mix(bo+1); ball.z = mix(bo+2); ball.spin = mix(bo+3);
     ball.vx = 0; ball.vy = 0; ball.vz = 0;
   }
 
@@ -4443,8 +4587,14 @@
   pauseBtn.addEventListener('click', togglePause);
 
   function step(dt){
-    matchTime -= dt;
-    if(matchTime <= 0){ matchTime = 0; endMatch(); }
+    // the ball is still in the net: keep simulating it, but stop the clock
+    if(goalAction > 0){
+      goalAction -= dt;
+      if(goalAction <= 0) finishGoal();
+    } else {
+      matchTime -= dt;
+    }
+    if(matchTime <= 0 && goalAction <= 0){ matchTime = 0; endMatch(); }
     timeEl.textContent = formatTime(matchTime);
     timeEl.classList.toggle('low', matchTime <= 15 && matchTime > 0);
 
@@ -4508,6 +4658,7 @@
       if(hudTimer > 0.5){ hudTimer = 0; updatePossessionHud(); }
     }
     updateParticles(dt);
+    updateAmbience(dt);
     updateNets(dt);
 
     // ---- render ----
@@ -4632,6 +4783,7 @@
     resetPowerups();
     resetNets();
     replay.count = 0; replay.head = 0; replay.active = false;
+    goalAction = 0; pendingGoal = null;
     celebration = null;
     kickoffTimer = 1.2;
     updateScore(null);
@@ -4640,6 +4792,7 @@
     poss2El.textContent = 'Posesión 50%';
     timeEl.textContent = formatTime(matchTime);
     statusEl.textContent = '';
+    startAmbience();
     startIntro();
     if(!intro.active) sfx.whistle();
   });

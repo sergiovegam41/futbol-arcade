@@ -16,8 +16,16 @@ Los jugadores son formas simples (cuerpo, cabeza y una cuña que marca hacia dó
 
 Si three.js no carga, el botón lo dice y el juego se queda en 2D: la página nunca depende del CDN para ser jugable.
 
+## Sonido de estadio
+
+El público se oye y **reacciona a lo que pasa**: un murmullo constante de fondo y una capa más brillante que solo se abre según el balón se acerca a un arco. Medido, de 19% de intensidad en el medio campo a 93% dentro del área. Sube rápido y baja despacio, como una grada de verdad. Al marcar hay un rugido aparte.
+
+Está **sintetizado, no grabado**: una grabación serían megas de audio que descargar, licenciar y cachear, y que además se notaría el bucle. Esto son unas líneas de Web Audio que nunca se repiten y no pesan nada. Se apaga con el botón 🔊.
+
 ## Física del balón
 
+- **El gol no se corta en seco.** Al cruzar la línea el balón sigue vivo 1.35 s dentro del arco: entra en la red, golpea la tela, cae y rueda. El reloj se para durante ese rato y solo después llega la celebración y la repetición.
+- **Arco con fondo de verdad:** 62px de profundidad contra 220 de ancho, la proporción de uno real.
 - **Postes y travesaño sólidos.** Antes el balón los atravesaba. Ahora la madera existe: rebota con un *¡Al palo!*, sacudida de pantalla y sonido.
 - **Un gol tiene que pasar por debajo del larguero.** El arco mide 220×73 px (1:3, como uno real) y un balón por encima ya no cuenta.
 - **Resistencia cuadrática.** Antes el rozamiento era un porcentaje fijo por frame, así que un cañonazo y un pase perdían la misma *fracción*. La resistencia real crece con el cuadrado de la velocidad: un tiro fuerte frena de golpe y luego rueda; un pase suave sigue trotando. La resistencia de rodadura es aparte y solo actúa en el suelo.
@@ -78,7 +86,7 @@ La máquina no hace trampa: no lee el estado interno ni recibe ventajas de físi
 
 ## El partido
 
-5 contra 5: un arquero controlado por la IA, **2 defensas** y **2 delanteros** por equipo. Controlas a un jugador a la vez; el resto del equipo se mueve solo manteniendo la forma, adelantándose cuando atacas y replegándose cuando defiendes.
+7 contra 7: un arquero controlado por la IA, **2 defensas**, **2 mediocampistas** y **2 delanteros** por equipo. Controlas a un jugador a la vez; el resto del equipo se mueve solo manteniendo la forma, adelantándose cuando atacas y replegándose cuando defiendes.
 
 - **Si tú corres, todo el equipo corre contigo.** El sprint arrastra a los compañeros, que aceleran en bloque.
 - **El control siempre va a quien tiene el balón.** Si un compañero la roba o recibe un pase, pasas a manejarlo a él.
@@ -105,7 +113,7 @@ Conecta hasta dos mandos (el navegador los detecta solo después de que presione
 | Encarar / robar | `Y` o `LT` | `R` | `,` |
 | Sprint | `RT` | `Shift` izq. | `Ctrl` der. |
 | Modificador de tiro | `RB` | `C` | `Shift` der. |
-| Cambiar al más cercano | `LB` | `Q` | `M` |
+| Cambiar al más cercano de la línea | `LB` | `Q` | `M` |
 | Elegir por dirección | Palanca derecha | — | — |
 | Pausa | — | `P` o `Esc` | `P` o `Esc` |
 
@@ -122,7 +130,7 @@ Conecta hasta dos mandos (el navegador los detecta solo después de que presione
 - **Encarar (`Y`):** fija tu orientación sobre el balón y cierras más rápido. Si alcanzas al rival que la lleva, se la quitas y pasas a controlar al que robó.
 - **Arquero:** no se mueve hasta que pateas. Ahí arranca su tiempo de reacción (0.11–0.27 s) y solo entonces se compromete: la mayoría de las veces lee el tiro, y a veces apuesta por un palo y se va al contrario. Desde lejos le da tiempo de leerlo; de cerca el balón llega antes que su reacción y le toca adivinar. Si la pelota le pasa cerca se queda en pie y da un paso lateral. Sale de su línea a por balones sueltos, atrapa dentro del área y saca hacia un compañero libre; fuera del área solo puede despejarla con el pie.
 - **Vibración:** los tiros a menos de 560px del arco rival hacen vibrar el mando de ese jugador, más fuerte cuanto más cerca y más potente. También vibra el mando del que lleva el balón cuando un rival lo encara, subiendo de intensidad según se acerca, con un golpe seco al perderla. Requiere un mando con soporte de haptics; sin él, el juego funciona igual.
-- **Cambio de jugador:** es manual y depende de dónde esté el balón. En campo rival el botón alterna entre tus **delanteros**; en tu propia mitad, entre tus **defensas** — la línea que te sirve en esa fase. Dentro de la línea, la primera pulsación te da al más cercano al balón. Para elegir a cualquier otro está la palanca derecha. El único cambio automático es el de posesión.
+- **Cambio de jugador:** es manual y depende de dónde esté el balón. El campo se parte en tres bandas: en tu tercio el botón alterna entre **defensas**, en el medio entre **mediocampistas** y en el tercio rival entre **delanteros** — la línea que te sirve en esa fase. Dentro de la línea, la primera pulsación te da al más cercano al balón. Para elegir a cualquier otro está la palanca derecha. El único cambio automático es el de posesión.
 
 ## Estructura
 
