@@ -198,6 +198,7 @@
       powerup: null,
       powerupTimer: 0,
       curveAim: 0,
+      cpu: null,
       modArmed: false,
       chargeKind: null,
       containing: false,
@@ -423,6 +424,7 @@
       team.switchCursor = 0;
       team.chainTimer = 0;
       team.modArmed = false;
+      if(team.cpu) team.cpu = makeCpuState();
       team.containing = false;
       team.powerHeld = false;
       team.advance = 0;
@@ -527,7 +529,10 @@
       chip1.textContent = 'Mando 1: no conectado (usa WASD)';
       chip1.classList.remove('on');
     }
-    if(connected[1]){
+    if(cpuMode){
+      chip2.textContent = '🤖 Jugador 2: la máquina';
+      chip2.classList.add('on');
+    } else if(connected[1]){
       chip2.textContent = 'Mando 2: conectado ✔ (' + trimName(connected[1].id) + ')';
       chip2.classList.add('on');
     } else {
@@ -778,7 +783,210 @@
   /* =========================================================
      Human input resolution
      ========================================================= */
-  function getInputFor(team){
+  /* =========================================================
+     Machine opponent
+     The bot gets no privileged access to the simulation: it fills in the same
+     controller struct a human does, and everything downstream — close control,
+     the charge bar, contain, slides — treats it exactly like a player. If a
+     mechanic works for you it works for the machine, and vice versa.
+     ========================================================= */
+  let cpuMode  = false;   // is team 2 the machine?
+  let cpuLevel = 1;
+
+  const CPU_LEVELS = [
+    { name:'Fácil',   think:0.42, range:340, aim:0.50, sprint:0.30, charge:0.55,
+      contain:0.30, switchGap:240, pass:0.22, slide:0.03 },
+    { name:'Normal',  think:0.17, range:520, aim:0.81, sprint:0.74, charge:0.87,
+      contain:0.62, switchGap:150, pass:0.40, slide:0.08 },
+    { name:'Difícil', think:0.11, range:560, aim:0.90, sprint:0.88, charge:0.94,
+      contain:0.80, switchGap:115, pass:0.52, slide:0.12 }
+  ];
+
+  function makeCpuState(){
+    return { think:0, aimX:W/2, aimY:H/2, holdKind:null, holdLeft:0, sprint:false,
+             switchCd:0, jitterX:0, jitterY:0, jitterT:0, actCd:0 };
+  }
+
+  function isCpu(team){ return cpuMode && !team.isP1; }
+
+  function neutralInput(){
+    return { dx:0, dy:0, kick:false, pass:false, sprint:false,
+             power:false, contain:false, modifier:false };
+  }
+
+  function steer(out, p, tx, ty){
+    const dx = tx - p.x, dy = ty - p.y;
+    const d = Math.hypot(dx, dy) || 1;
+    out.dx = dx/d; out.dy = dy/d;
+  }
+
+  function nearestOpponent(team, x, y){
+    const foes = team === team1 ? team2 : team1;
+    let best = null, bd = Infinity;
+    for(const f of foes.outfield){
+      const d = Math.hypot(f.x - x, f.y - y);
+      if(d < bd){ bd = d; best = f; }
+    }
+    return best;
+  }
+
+  // the open teammate the bot would rather give it to
+  function cpuBestMate(team, p){
+    let best = null, bestScore = -Infinity;
+    const fwd = team.side === 'left' ? 1 : -1;
+    for(const mate of team.outfield){
+      if(mate === p || mate.downTimer > 0 || mate.slideTimer > 0) continue;
+      const d = Math.hypot(mate.x - p.x, mate.y - p.y);
+      if(d < 90 || d > 620) continue;
+      const score = nearestOpponentDist(team, mate.x, mate.y) + (mate.x - p.x) * fwd * 0.45;
+      if(score > bestScore){ bestScore = score; best = mate; }
+    }
+    return best;
+  }
+
+  function cpuInput(team, dt){
+    const cfg = CPU_LEVELS[cpuLevel] || CPU_LEVELS[1];
+    const st  = team.cpu || (team.cpu = makeCpuState());
+    const out = neutralInput();
+    const p   = getControlled(team);
+    if(!p) return out;
+
+    st.switchCd -= dt;
+    st.actCd    -= dt;
+    st.jitterT  -= dt;
+    if(st.jitterT <= 0){
+      // aiming error: weaker levels miss rather than being handicapped by cheats
+      st.jitterT = 0.45 + Math.random() * 0.6;
+      st.sprint  = Math.random() < cfg.sprint;   // sticky, not re-rolled every frame
+      const spread = (1 - cfg.aim) * 190;
+      st.jitterX = (Math.random() - 0.5) * spread;
+      st.jitterY = (Math.random() - 0.5) * spread;
+    }
+
+    const goal   = opponentGoal(team);
+    // A loose ball is nobody's: treating the last toucher as the owner made
+    // the bot stand around supporting a team-mate who no longer had it.
+    const ownerOnBall = ballOwner &&
+      Math.hypot(ball.x - ballOwner.x, ball.y - ballOwner.y) <= CARRY_RANGE;
+    const mine   = ownerOnBall && ballOwner.side === team.side;
+    const onBall = ballOwner === p && ballDist(p) < CARRY_RANGE && ball.z <= REACH_LOW;
+    const dGoal  = Math.hypot(goal.x - p.x, goal.y - p.y);
+    const dBall  = ballDist(p);
+
+    // ---- mid wind-up: hold the button down and keep running in ----
+    if(st.holdLeft > 0){
+      st.holdLeft -= dt;
+      if(st.holdKind === 'power') out.power = true; else out.kick = true;
+      steer(out, p, goal.x + st.jitterX, goal.y + st.jitterY);
+      if(st.holdLeft <= 0) st.holdKind = null;   // let go on the next frame
+      return out;
+    }
+
+    // decisions are only refreshed every `think` seconds, so the easy levels
+    // genuinely react late instead of being artificially slowed down
+    if(st.think > 0) st.think -= dt;
+
+    if(onBall){
+      const pressure = nearestOpponentDist(team, p.x, p.y);
+      const facing   = ((goal.x - p.x) * p.facing.x + (goal.y - p.y) * p.facing.y) / (dGoal || 1);
+
+      if(st.actCd <= 0 && dGoal < cfg.range && facing > 0.35){
+        const usePower = Math.random() < 0.55;
+        st.holdKind = usePower ? 'power' : 'kick';
+        const full  = usePower ? POWER_TIME : CHARGE_TIME;
+        st.holdLeft = full * cfg.charge * (0.75 + Math.random() * 0.35);
+        st.actCd    = 0.8;
+        if(usePower) out.power = true; else out.kick = true;
+        steer(out, p, goal.x + st.jitterX, goal.y + st.jitterY);
+        return out;
+      }
+
+      // Do not try to dribble out of your own third under pressure: that is
+      // where giving it away costs a goal, so play it away instead.
+      const ownGoal = { x: team.side === 'left' ? FIELD_MARGIN : W - FIELD_MARGIN, y: H/2 };
+      const dOwn = Math.hypot(ownGoal.x - p.x, ownGoal.y - p.y);
+      const mate = cpuBestMate(team, p);
+      if(st.actCd <= 0 && dOwn < 360 && pressure < 105){
+        out.pass = true;
+        st.actCd = 0.45;
+        steer(out, p, mate ? mate.x : goal.x, mate ? mate.y : goal.y);
+        return out;
+      }
+      if(st.actCd <= 0 && mate && pressure < 150 && Math.random() < cfg.pass){
+        out.pass = true;
+        st.actCd = 0.5;
+        steer(out, p, mate.x, mate.y);
+        return out;
+      }
+
+      // carry it at goal, drifting around whoever is closest
+      if(st.think <= 0){
+        st.think = cfg.think;
+        let ty = goal.y + st.jitterY * 0.5;
+        const foe = nearestOpponent(team, p.x, p.y);
+        if(foe && Math.hypot(foe.x - p.x, foe.y - p.y) < 140){
+          ty += (p.y < foe.y ? -1 : 1) * 150;      // sidestep the defender
+        }
+        st.aimX = goal.x;
+        st.aimY = Math.max(FIELD_MARGIN + 60, Math.min(H - FIELD_MARGIN - 60, ty));
+      }
+      steer(out, p, st.aimX, st.aimY);
+      out.sprint = st.sprint;
+      return out;
+    }
+
+    if(mine){
+      // if I am the closest of my side, go and get it rather than support
+      let closest = true;
+      for(const mate of team.outfield){
+        if(mate === p || mate.downTimer > 0) continue;
+        if(Math.hypot(ball.x - mate.x, ball.y - mate.y) < dBall - 20){ closest = false; break; }
+      }
+      if(closest && dBall > 60){
+        steer(out, p, ball.x, ball.y);
+        out.sprint = st.sprint;
+        return out;
+      }
+      // a teammate has it: get up the pitch and offer a target
+      if(st.think <= 0){
+        st.think = cfg.think;
+        const fwd = team.side === 'left' ? 1 : -1;
+        st.aimX = Math.max(FIELD_MARGIN + 60, Math.min(W - FIELD_MARGIN - 60, ball.x + fwd * 240));
+        st.aimY = Math.max(FIELD_MARGIN + 60, Math.min(H - FIELD_MARGIN - 60, ball.y + st.jitterY));
+      }
+      steer(out, p, st.aimX, st.aimY);
+      out.sprint = st.sprint;
+      return out;
+    }
+
+    // ---- defending: go and win it back ----
+    if(st.switchCd <= 0 && dBall > cfg.switchGap){
+      manualSwitch(team);               // take someone closer to the play
+      st.switchCd = 0.9;
+      return out;
+    }
+    if(st.think <= 0){
+      st.think = cfg.think;
+      // stand goal-side of the ball rather than running at it head-on
+      const own = { x: team.side === 'left' ? FIELD_MARGIN : W - FIELD_MARGIN, y: H/2 };
+      const gx = own.x - ball.x, gy = own.y - ball.y;
+      const gl = Math.hypot(gx, gy) || 1;
+      st.aimX = ball.x + (gx/gl) * 26 + st.jitterX * 0.4;
+      st.aimY = ball.y + (gy/gl) * 26 + st.jitterY * 0.4;
+    }
+    steer(out, p, st.aimX, st.aimY);
+    out.sprint = dBall > 130 && st.sprint;
+    if(dBall < 110) out.contain = Math.random() < cfg.contain;
+    if(st.actCd <= 0 && dBall < 70 && ballOwner && ballOwner.side !== team.side &&
+       Math.random() < cfg.slide){
+      out.pass = true;                  // X with no ball is a slide tackle
+      st.actCd = 1.6;
+    }
+    return out;
+  }
+
+  function getInputFor(team, dt){
+    if(isCpu(team)) return cpuInput(team, dt || 1/60);
     const pad = readPadInput(team.isP1 ? 0 : 1);
     if(pad) return pad;
     let dx = 0, dy = 0, kick = false, sprint = false, pass = false,
@@ -1256,7 +1464,7 @@
 
   function updateControlledPlayer(team, dt){
     const p = getControlled(team);
-    const input = getInputFor(team);
+    const input = getInputFor(team, dt);
 
     // on the floor (or committed to a slide): no input gets through
     if(updateSlide(team, p, dt)){
@@ -2739,6 +2947,45 @@
   /* =========================================================
      Start / options
      ========================================================= */
+  // ---- who is player 2: a friend on the couch, or the machine ----
+  const modeSeg  = document.getElementById('mode-seg');
+  const levelSeg = document.getElementById('level-seg');
+  const levelRow = document.getElementById('level-row');
+  const p2Col    = document.querySelector('.controls-col.p2');
+  const crest2   = document.querySelector('.team-tag.p2 .crest');
+  const name2    = document.querySelector('.team-tag.p2 .team-name');
+
+  function applyMode(){
+    if(levelRow) levelRow.hidden = !cpuMode;
+    if(p2Col)  p2Col.style.display = cpuMode ? 'none' : '';
+    if(crest2) crest2.textContent = cpuMode ? 'CPU' : 'ROJ';
+    if(name2)  name2.textContent  = cpuMode ? ('Máquina · ' + CPU_LEVELS[cpuLevel].name) : 'Jugador 2';
+    team2.cpu = cpuMode ? makeCpuState() : null;
+    updatePadChips();
+  }
+
+  if(modeSeg){
+    modeSeg.addEventListener('click', e => {
+      const btn = e.target.closest('button');
+      if(!btn) return;
+      modeSeg.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      cpuMode = btn.dataset.mode === 'cpu';
+      applyMode();
+    });
+  }
+
+  if(levelSeg){
+    levelSeg.addEventListener('click', e => {
+      const btn = e.target.closest('button');
+      if(!btn) return;
+      levelSeg.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      cpuLevel = parseInt(btn.dataset.level, 10);
+      applyMode();
+    });
+  }
+
   lenSeg.addEventListener('click', e => {
     const btn = e.target.closest('button');
     if(!btn) return;
@@ -2771,5 +3018,6 @@
   });
 
   assignHair();
+  applyMode();
   requestAnimationFrame(gameLoop);
 })();

@@ -6,6 +6,18 @@ Juego de fútbol arcade para dos jugadores en el mismo equipo, hecho con HTML, C
 
 ---
 
+## Modos
+
+Al empezar eliges rival: **👥 Un amigo** (dos mandos o teclado compartido) o **🤖 La máquina**, con tres niveles.
+
+La máquina no hace trampa: no lee el estado interno ni recibe ventajas de física. Rellena exactamente la misma estructura de mando que un humano, así que el control cerrado, la barra de carga, el encarar y las barridas funcionan igual para ella. La dificultad cambia su **tiempo de reacción**, su **puntería** (error de apuntado real, no penalizaciones artificiales), cuánto **esprinta**, cuánto carga los tiros y cuándo decide entrar a barrer.
+
+| Nivel | Marcador medio frente a un bot que persigue y remata (3 min) |
+|---|---|
+| Fácil | pierde 2.2 - 0.2 |
+| Normal | pierde 1.5 - 1.0 |
+| Difícil | compite 1.0 - 0.7 |
+
 ## El partido
 
 5 contra 5: un arquero controlado por la IA, **2 defensas** y **2 delanteros** por equipo. Controlas a un jugador a la vez; el resto del equipo se mueve solo manteniendo la forma, adelantándose cuando atacas y replegándose cuando defiendes.
