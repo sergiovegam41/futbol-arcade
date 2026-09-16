@@ -359,10 +359,10 @@
   // players in the same side share one, and the pairing is fixed per match.
   // Hairstyles are off until real art replaces the drawn shapes. Flip this to
   // true to bring the placeholder styles back.
-  const HAIR_ENABLED = false;
+  const HAIR_ENABLED = true;    // styles are assigned; only the 3D view draws them
 
   function assignHair(){   // called once below, after HAIR_STYLES exists
-    if(!HAIR_ENABLED) return;   // leaves hairStyle null, so drawPlayer skips it
+    if(!HAIR_ENABLED) return;
     teams.forEach((team, ti) => {
       const styles = HAIR_STYLES.slice();
       const squad = [team.gk].concat(team.outfield);
@@ -832,7 +832,10 @@
   }
 
   function goalCheck(){
-    if(pendingGoal) return false;   // already inside, let it play out
+    // Not while one is already being resolved. Without the replay half of
+    // this, finishGoal() cleared pendingGoal with the ball still sitting in
+    // the net, and the very same frame counted it as a second goal.
+    if(pendingGoal || replay.active) return false;
     // left goal — red scores
     // under the bar and between the posts, or it is not a goal
     const underBar = ball.z < GOAL_H_PX;
@@ -906,6 +909,7 @@
       // the net is punched when the REPLAY reaches the moment of impact, not
       // when the goal is given — otherwise it has finished bouncing by then
       resetNets();
+      resetPositions();   // out of the net before anything else looks at it
       kickoffTimer = 0;
     } else {
       kickoffTimer = 1.8;
@@ -3055,6 +3059,7 @@
      like individuals. Drawn in head space (already rotated to the heading), so
      the parting, the bun and the ponytail all sit at the back of the head and
      swing round as the player turns. */
+  const HAIR_2D = false;        // the flat drawing stays off
   const HAIR_STYLES = ['buzz', 'afro', 'mohawk', 'ponytail', 'bun', 'curls', 'bald', 'long'];
   const HAIR_COLORS = ['#2b2119', '#0f0d0c', '#6b4a2a', '#d8b36a', '#a8501f', '#c9c4bd'];
 
@@ -3261,8 +3266,9 @@
     ctx.strokeStyle = isGK ? p.color : 'rgba(0,0,0,0.4)';
     ctx.stroke();
 
-    // hair, clipped to the head and turned to face the heading
-    if(p.hairStyle){
+    // The flat version of this looked wrong, so the top-down view leaves it
+    // out; the hair lives in 3D now.
+    if(HAIR_2D && p.hairStyle){
       ctx.save();
       ctx.beginPath();
       ctx.arc(0, 0, p.radius - 1.5, 0, Math.PI*2);
@@ -4310,6 +4316,98 @@
     }
   }
 
+  /* ---- hair, in 3D ----
+     The flat top-down version of this looked odd and got switched off. In 3D it
+     is just geometry sitting on the head, so it reads properly: the parting, the
+     bun and the ponytail sit at the back and swing round as the player turns,
+     because the whole player group is already rotated to his heading.
+     Front is +z (that is where the nose is), so back is -z. */
+  function addHair(group, p, r){
+    if(!p.hairStyle) return;
+    const h = makeHair3d(p.hairStyle, p.hairColor, r);
+    if(h) group.add(h);
+  }
+
+  function makeHair3d(style, colour, r){
+    const g = new THREE.Group();
+    const mat = new THREE.MeshLambertMaterial({ color: new THREE.Color(colour) });
+    const head = r * 0.72;
+    const top  = r * 3.5;          // head centre height, matching makePlayerMesh
+
+    const cap = (scale, lift) => {
+      const m = new THREE.Mesh(new THREE.SphereGeometry(head * (scale || 1.06), 12, 9), mat);
+      m.position.y = top + (lift || head * 0.12);
+      m.scale.y = 0.82;
+      return m;
+    };
+
+    switch(style){
+      case 'bald':
+        return null;                                  // nothing to see
+
+      case 'buzz':
+        g.add(cap(1.04, head * 0.10));
+        break;
+
+      case 'afro': {
+        const a = new THREE.Mesh(new THREE.SphereGeometry(head * 1.55, 12, 10), mat);
+        a.position.y = top + head * 0.20;
+        g.add(a);
+        break;
+      }
+
+      case 'mohawk': {
+        g.add(cap(1.02, head * 0.06));
+        const ridge = new THREE.Mesh(
+          new THREE.BoxGeometry(head * 0.34, head * 1.15, head * 2.0), mat);
+        ridge.position.y = top + head * 0.85;
+        g.add(ridge);
+        break;
+      }
+
+      case 'ponytail': {
+        g.add(cap(1.08, head * 0.12));
+        const tail = new THREE.Mesh(
+          new THREE.CylinderGeometry(head * 0.30, head * 0.16, head * 2.1, 8), mat);
+        tail.position.set(0, top - head * 0.25, -head * 1.15);
+        tail.rotation.x = -0.75;                      // hanging down the back
+        g.add(tail);
+        break;
+      }
+
+      case 'bun': {
+        g.add(cap(1.06, head * 0.12));
+        const knot = new THREE.Mesh(new THREE.SphereGeometry(head * 0.55, 10, 8), mat);
+        knot.position.set(0, top + head * 0.75, -head * 0.75);
+        g.add(knot);
+        break;
+      }
+
+      case 'curls': {
+        for(let i = 0; i < 9; i++){
+          const a = (i / 9) * Math.PI * 2;
+          const c = new THREE.Mesh(new THREE.SphereGeometry(head * 0.44, 8, 6), mat);
+          c.position.set(Math.cos(a) * head * 0.72,
+                         top + head * 0.35 + (i % 2) * head * 0.28,
+                         Math.sin(a) * head * 0.72);
+          g.add(c);
+        }
+        break;
+      }
+
+      case 'long':
+      default: {
+        g.add(cap(1.08, head * 0.12));
+        const fall = new THREE.Mesh(
+          new THREE.BoxGeometry(head * 1.75, head * 2.4, head * 0.55), mat);
+        fall.position.set(0, top - head * 0.85, -head * 0.80);
+        g.add(fall);
+        break;
+      }
+    }
+    return g;
+  }
+
   function makePlayerMesh(p){
     const group = new THREE.Group();
     const col   = new THREE.Color(p.role === 'GK' ? '#f3f5f0' : p.color);
@@ -4354,9 +4452,11 @@
       tag.position.y = r * 5.4;
       group.add(tag);
       group.userData = { body, head, nose, ring, tag, base:r };
+      addHair(group, p, r);
       return group;
     }
     group.userData = { body, head, nose, ring, base:r };
+    addHair(group, p, r);
     return group;
   }
 

@@ -60,6 +60,7 @@ La red **no se abomba al marcar, sino cuando la repetición llega a ese instante
 
 ## Estadio y detalle
 
+- **Pelucas.** Cada personaje lleva su pelo en 3D: afro, mohawk, coleta, moño, rizos, media melena, rapado… y un calvo por equipo. Repartidos sin repetir y montados sobre la cabeza, así que giran con el jugador. La vista cenital no los dibuja: en plano quedaban raros.
 - **Plantillas con nombre.** Cada jugador se llama algo: KK, Penélope, El Tanque, Pantufla, Don Cangrejo… Los arqueros tienen su propio bombo de nombres (Manotas, El Muro, Palomita). Se reparten sin repetir al empezar, salen sobre la cabeza y **el gol anuncia al goleador** — o al del gol en propia, que también se reconoce.
 - **Redes de tela Verlet.** Cada arco lleva una red de 207 nodos simulada con la misma técnica que el ejemplo de cloth de three.js: integración Verlet, restricciones de distancia que solo tiran cuando la tela se estira (una red se afloja, no es elástica) y gravedad, así que **cuelga bajo su propio peso**. La malla es una sola lámina doblada en U, de modo que los dos laterales y el fondo son la misma tela y las esquinas quedan cosidas.
 
