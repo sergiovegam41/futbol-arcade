@@ -18,7 +18,8 @@
   // down with the rest of the 3D code.
   let view3d = false;
   const g3 = { ready:false, renderer:null, scene:null, camera:null,
-               players:[], ball:null, camX:0, camZ:0 };
+               players:[], ball:null, camX:0, camZ:0,
+               nets3d:[], crowd:null, flags:null };
 
   // The stage gets an EXPLICIT pixel size. Letting it size itself from the
   // canvas while the canvas sized itself from the stage was circular, and the
@@ -277,6 +278,105 @@
      Particles (grass, sparks, confetti)
      ========================================================= */
   /* =========================================================
+     Squad names
+     Deliberately daft. They are what turns "el 9" into somebody you shout at,
+     and they are what the goal banner announces.
+     ========================================================= */
+  const NAME_POOL = [
+    'KK', 'Penélope', 'Chuchito', 'El Tanque', 'Nacho', 'Bigotes',
+    'Tofu', 'La Foca', 'Pepe Botella', 'Mamá Luchi', 'Cucho', 'Tuti',
+    'Chespirito', 'Lomito', 'Pelusa', 'Don Cangrejo', 'Rocío', 'Pantufla',
+    'Bombón', 'El Pulpo', 'Moco', 'Yiyo', 'Chancla', 'Pipo'
+  ];
+  const GK_NAMES = ['Manotas', 'El Muro', 'Guantes', 'Palomita', 'Tapón', 'Cocodrilo'];
+
+  function assignNames(){
+    const pool = NAME_POOL.slice();
+    const gkPool = GK_NAMES.slice();
+    for(const team of teams){
+      team.gk.name = gkPool.splice(Math.floor(Math.random() * gkPool.length), 1)[0] || 'Arquero';
+      for(const pl of team.outfield){
+        pl.name = pool.splice(Math.floor(Math.random() * pool.length), 1)[0] || ('#' + pl.number);
+      }
+    }
+  }
+
+  /* =========================================================
+     Goal nets
+     A little cloth so the net tells you how hard you hit it: a grid of points
+     that can only move along the goal's axis, pulled back to rest by a spring
+     and dragged around by their neighbours. The ball's speed on the way in is
+     the impulse, so a tap ripples and a screamer bulges.
+     ========================================================= */
+  const NET_COLS = 13;    // across the goal mouth
+  const NET_ROWS = 8;     // up the goal
+  const NET_SPRING  = 52;   // pull back to rest
+  const NET_DAMP    = 3.4;  // energy bleed
+  const NET_SPREAD  = 26;   // how much neighbours drag each other
+
+  function makeNet(){
+    const n = NET_COLS * NET_ROWS;
+    return { disp: new Float32Array(n), vel: new Float32Array(n), energy: 0 };
+  }
+  const nets = { left: makeNet(), right: makeNet() };
+
+  function netAt(net, c, r){
+    if(c < 0 || c >= NET_COLS || r < 0 || r >= NET_ROWS) return 0;
+    return net.disp[r * NET_COLS + c];
+  }
+
+  // y across the mouth, z up the goal, power in ball-speed units
+  function netImpulse(side, y, z, power){
+    const net = nets[side];
+    if(!net) return;
+    const fy = (y - topGoalY) / GOAL_WIDTH;                  // 0..1 across
+    const fz = Math.max(0, Math.min(1, z / 70));             // 0..1 up
+    const cc = Math.round(fy * (NET_COLS - 1));
+    const rr = Math.round((1 - fz) * (NET_ROWS - 1));
+    const hit = Math.max(0.6, Math.min(power / 12, 2.4));
+    for(let r = 0; r < NET_ROWS; r++){
+      for(let c = 0; c < NET_COLS; c++){
+        const d = Math.hypot(c - cc, (r - rr) * 1.2);
+        const falloff = Math.exp(-(d * d) / 7);
+        net.vel[r * NET_COLS + c] += hit * 34 * falloff;
+      }
+    }
+    net.energy = 1;
+  }
+
+  function updateNets(dt){
+    const step = Math.min(dt, 1/30);
+    for(const side of ['left', 'right']){
+      const net = nets[side];
+      if(net.energy <= 0) continue;
+      let moving = 0;
+      for(let r = 0; r < NET_ROWS; r++){
+        for(let c = 0; c < NET_COLS; c++){
+          const i = r * NET_COLS + c;
+          const edge = (c === 0 || c === NET_COLS - 1 || r === 0 || r === NET_ROWS - 1);
+          if(edge){ net.disp[i] = 0; net.vel[i] = 0; continue; }
+          const around = netAt(net, c-1, r) + netAt(net, c+1, r) +
+                         netAt(net, c, r-1) + netAt(net, c, r+1);
+          const acc = -NET_SPRING * net.disp[i] + NET_SPREAD * (around - 4 * net.disp[i]);
+          net.vel[i] += acc * step;
+          net.vel[i] -= net.vel[i] * NET_DAMP * step;
+          net.disp[i] += net.vel[i] * step;
+          moving += Math.abs(net.disp[i]) + Math.abs(net.vel[i]);
+        }
+      }
+      if(moving < 0.05){
+        net.disp.fill(0); net.vel.fill(0); net.energy = 0;
+      }
+    }
+  }
+
+  function resetNets(){
+    for(const side of ['left', 'right']){
+      nets[side].disp.fill(0); nets[side].vel.fill(0); nets[side].energy = 0;
+    }
+  }
+
+  /* =========================================================
      Power-ups
      Rare pickups that drop on the pitch. Deliberately scarce: one on the
      grass at a time and a hard cap per match, so they stay a moment rather
@@ -478,21 +578,37 @@
   function goalCheck(){
     // left goal — red scores
     if(ball.x - ball.radius < FIELD_MARGIN - GOAL_DEPTH*0.5 && ball.y > topGoalY && ball.y < botGoalY){
-      score2++; onGoal(team2); return true;
+      score2++; onGoal(team2, 'left'); return true;
     }
     // right goal — blue scores
     if(ball.x + ball.radius > W - FIELD_MARGIN + GOAL_DEPTH*0.5 && ball.y > topGoalY && ball.y < botGoalY){
-      score1++; onGoal(team1); return true;
+      score1++; onGoal(team1, 'right'); return true;
     }
     return false;
   }
 
-  function onGoal(team){
+  function onGoal(team, netSide){
     updateScore(team.isP1 ? score1El : score2El);
-    flashStatus('¡GOL del equipo ' + team.name + '!');
-    celebration = { text:'¡GOOOL!', sub:'Equipo ' + team.name, color:team.color, t:0 };
+
+    // the net takes the hit before anything is reset, so the bulge matches
+    // the shot that actually went in
+    const speed = Math.hypot(ball.vx, ball.vy);
+    if(netSide) netImpulse(netSide, ball.y, ball.z, speed);
+
+    // whoever touched it last gets the credit — or the blame
+    const toucher = ballOwner;
+    const own  = toucher && toucher.side !== team.side;
+    const who  = toucher ? (toucher.name || ('#' + toucher.number)) : null;
+    const line = !who ? ('Equipo ' + team.name)
+               : own  ? ('en propia de ' + who)
+                      : ('de ' + who);
+    flashStatus(own ? ('¡Gol en propia de ' + who + '!') : ('¡GOL ' + line + '!'));
+    celebration = { text: own ? '¡EN PROPIA!' : '¡GOOOL!', sub: line,
+                    color: team.color, t:0 };
     shake = 16;
     sfx.goal();
+    crowdCheer(2.4);
+    if(g3.ready) throwCheerBits();
     // confetti burst from the goal mouth
     const gx = team.side === 'left' ? W - FIELD_MARGIN : FIELD_MARGIN;
     for(let i = 0; i < 70; i++){
@@ -1625,7 +1741,15 @@
     // ----- X: pass with the ball, slide tackle without it -----
     if(input.pass && !team.passHeld){
       if((carrying || touching) && team.passCooldown <= 0 && p.kickCooldown <= 0){
-        passToTeammate(team, p);
+        if(modHeld){
+          // X + the modifier chips it: a lofted pass on the pass button, with
+          // the arc worked out from how far it actually has to travel
+          const mate = pickPassTarget(team, p);
+          const far  = mate ? Math.hypot(mate.x - p.x, mate.y - p.y) : 360;
+          loftedPass(team, p, Math.max(0.25, Math.min(far / 620, 1)));
+        } else {
+          passToTeammate(team, p);
+        }
       } else if(p.slideTimer <= 0 && p.downTimer <= 0){
         startSlide(team, p);
       }
@@ -2299,20 +2423,67 @@
     c.fillStyle = outer;
     c.fillRect(0, 0, W, H);
 
-    // mowed stripes
+    // ---- mowed stripes, with the roller's sheen across each band ----
     const stripes = 14;
     const stripeW = (W - FIELD_MARGIN*2) / stripes;
+    const pitchH  = H - FIELD_MARGIN*2;
     for(let i = 0; i < stripes; i++){
-      c.fillStyle = i % 2 === 0 ? '#2f7343' : '#37854e';
-      c.fillRect(FIELD_MARGIN + i*stripeW, FIELD_MARGIN, stripeW + 0.5, H - FIELD_MARGIN*2);
+      const x0 = FIELD_MARGIN + i*stripeW;
+      const dark = i % 2 === 0;
+      const band = c.createLinearGradient(x0, 0, x0 + stripeW, 0);
+      // a mown stripe is brighter where the grass leans away from you
+      band.addColorStop(0,    dark ? '#2b6c3d' : '#357f4a');
+      band.addColorStop(0.45, dark ? '#317845' : '#3c8b53');
+      band.addColorStop(1,    dark ? '#2a6a3b' : '#337c47');
+      c.fillStyle = band;
+      c.fillRect(x0, FIELD_MARGIN, stripeW + 0.5, pitchH);
     }
+
+    // ---- blade speckle: a lot of tiny marks so it stops looking like paper ----
+    c.save();
+    c.beginPath();
+    c.rect(FIELD_MARGIN, FIELD_MARGIN, W - FIELD_MARGIN*2, pitchH);
+    c.clip();
+    for(let i = 0; i < 2600; i++){
+      const gx = FIELD_MARGIN + Math.random() * (W - FIELD_MARGIN*2);
+      const gy = FIELD_MARGIN + Math.random() * pitchH;
+      const light = Math.random() < 0.5;
+      c.strokeStyle = light ? 'rgba(190,230,175,0.10)' : 'rgba(18,54,30,0.12)';
+      c.lineWidth = 1;
+      c.beginPath();
+      c.moveTo(gx, gy);
+      c.lineTo(gx + (Math.random() - 0.5) * 3, gy - 2 - Math.random() * 3);
+      c.stroke();
+    }
+
+    // ---- worn patches where a pitch actually wears: mouths, spots, centre ----
+    function wear(x, y, rx, ry, strength){
+      const g = c.createRadialGradient(x, y, 0, x, y, Math.max(rx, ry));
+      g.addColorStop(0, 'rgba(120,98,62,' + strength + ')');
+      g.addColorStop(0.6, 'rgba(110,95,60,' + (strength * 0.4) + ')');
+      g.addColorStop(1, 'rgba(110,95,60,0)');
+      c.save();
+      c.translate(x, y);
+      c.scale(rx / Math.max(rx, ry), ry / Math.max(rx, ry));
+      c.fillStyle = g;
+      c.beginPath();
+      c.arc(0, 0, Math.max(rx, ry), 0, Math.PI*2);
+      c.fill();
+      c.restore();
+    }
+    wear(FIELD_MARGIN + 34, H/2, 60, 150, 0.30);           // goalmouths
+    wear(W - FIELD_MARGIN - 34, H/2, 60, 150, 0.30);
+    wear(FIELD_MARGIN + 104, H/2, 40, 40, 0.22);           // penalty spots
+    wear(W - FIELD_MARGIN - 104, H/2, 40, 40, 0.22);
+    wear(W/2, H/2, 70, 70, 0.16);                          // kick-off circle
+    c.restore();
 
     // soft lighting across the pitch
     const light = c.createRadialGradient(W/2, H/2, 120, W/2, H/2, W*0.72);
     light.addColorStop(0, 'rgba(255,255,255,0.10)');
     light.addColorStop(1, 'rgba(0,0,0,0.30)');
     c.fillStyle = light;
-    c.fillRect(FIELD_MARGIN, FIELD_MARGIN, W - FIELD_MARGIN*2, H - FIELD_MARGIN*2);
+    c.fillRect(FIELD_MARGIN, FIELD_MARGIN, W - FIELD_MARGIN*2, pitchH);
 
     c.strokeStyle = 'rgba(240,250,240,0.82)';
     c.lineWidth = 3;
@@ -2389,19 +2560,44 @@
       ctx.fillStyle = 'rgba(255,255,255,0.10)';
       ctx.fillRect(x0, topGoalY, GOAL_DEPTH, GOAL_WIDTH);
 
-      // net mesh
+      // ---- net mesh, bulging with whatever just hit it ----
+      // Seen from above only the sideways give of the cloth is visible, so the
+      // back line of the net is drawn displaced by the simulation.
+      const net = nets[side];
+      const midRow = Math.floor(NET_ROWS / 2);
+      const bulgeAt = (yy) => {
+        const f = Math.max(0, Math.min(1, (yy - topGoalY) / GOAL_WIDTH));
+        const cf = f * (NET_COLS - 1);
+        const c0 = Math.floor(cf), c1 = Math.min(NET_COLS - 1, c0 + 1);
+        const t = cf - c0;
+        const d0 = net.disp[midRow * NET_COLS + c0];
+        const d1 = net.disp[midRow * NET_COLS + c1];
+        return (d0 + (d1 - d0) * t) * (side === 'left' ? -1 : 1);
+      };
+
       ctx.save();
       ctx.beginPath();
-      ctx.rect(x0, topGoalY, GOAL_DEPTH, GOAL_WIDTH);
+      ctx.rect(x0 - 26, topGoalY - 4, GOAL_DEPTH + 52, GOAL_WIDTH + 8);
       ctx.clip();
-      ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+      ctx.strokeStyle = 'rgba(255,255,255,0.30)';
       ctx.lineWidth = 1;
-      for(let x = x0; x <= x0 + GOAL_DEPTH; x += 8){
-        ctx.beginPath(); ctx.moveTo(x, topGoalY); ctx.lineTo(x, topGoalY + GOAL_WIDTH); ctx.stroke();
+      // strands running back from the line, each ending on the stretched net
+      for(let y = topGoalY; y <= topGoalY + GOAL_WIDTH; y += 7){
+        const back = x0 + (side === 'left' ? 0 : GOAL_DEPTH) + bulgeAt(y);
+        ctx.beginPath();
+        ctx.moveTo(side === 'left' ? x0 + GOAL_DEPTH : x0, y);
+        ctx.lineTo(back, y);
+        ctx.stroke();
       }
-      for(let y = topGoalY; y <= topGoalY + GOAL_WIDTH; y += 8){
-        ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x0 + GOAL_DEPTH, y); ctx.stroke();
+      // and the back face itself, as a curve through the displaced points
+      ctx.beginPath();
+      for(let y = topGoalY; y <= topGoalY + GOAL_WIDTH; y += 5){
+        const bx = x0 + (side === 'left' ? 0 : GOAL_DEPTH) + bulgeAt(y);
+        if(y === topGoalY) ctx.moveTo(bx, y); else ctx.lineTo(bx, y);
       }
+      ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
       ctx.restore();
 
       // posts
@@ -2661,6 +2857,16 @@
     ctx.textBaseline = 'middle';
     ctx.fillText(isGK ? gkGlyph(p) : String(p.number), 0, 1);
 
+    // his name, so the squad stops being a set of numbers
+    if(p.name){
+      ctx.font = '600 11px "Segoe UI", sans-serif';
+      ctx.fillStyle = isControlled ? 'rgba(255,240,190,0.98)' : 'rgba(255,255,255,0.55)';
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+      ctx.lineWidth = 3;
+      ctx.strokeText(p.name, 0, -p.radius - 9);
+      ctx.fillText(p.name, 0, -p.radius - 9);
+    }
+
     // facing wedge
     const fx = p.facing.x || (p.side === 'left' ? 1 : -1);
     const fy = p.facing.y || 0;
@@ -2867,8 +3073,315 @@
 
   function has3d(){ return typeof THREE !== 'undefined' && !!canvas3d; }
 
+  const GOAL_H3 = 2.6;                       // goal height in world units
   function wx(x){ return (x - W/2) * S3; }   // pitch x  -> world x
   function wz(y){ return (y - H/2) * S3; }   // pitch y  -> world z
+
+  /* ---- crowd ----
+     Lumpy little people in the stands. They idle with a slow bob and jump when
+     something happens, each on its own offset so the stand ripples instead of
+     moving as one block. */
+  const CROWD_COLORS = ['#d94f3d','#3f7fd1','#e8c04a','#59a86b','#b060c0',
+                        '#e07f3a','#5ec7c7','#c9c9c9','#8a5a3b','#e36fa0'];
+  let crowdCheerT = 0;
+  function crowdCheer(secs){ crowdCheerT = Math.max(crowdCheerT, secs); }
+
+  function buildCrowd(){
+    const people = [];
+    const rows = 4;
+    const halfW3 = (W * S3) / 2;
+    const halfH3 = (H * S3) / 2;
+    const geoBody = new THREE.CylinderGeometry(0.42, 0.5, 1.2, 6);
+    const geoHead = new THREE.SphereGeometry(0.36, 7, 6);
+
+    function stand(cx, cz, dirX, dirZ, along, count){
+      for(let r = 0; r < rows; r++){
+        for(let i = 0; i < count; i++){
+          const t = (i / (count - 1) - 0.5) * along;
+          const back = r * 2.4 + 2.0;
+          const lift = r * 1.35 + 0.6;
+          const g = new THREE.Group();
+          const col = new THREE.Color(CROWD_COLORS[(i * 7 + r * 3) % CROWD_COLORS.length]);
+          const body = new THREE.Mesh(geoBody, new THREE.MeshLambertMaterial({ color: col }));
+          body.position.y = 0.6;
+          g.add(body);
+          const head = new THREE.Mesh(geoHead, new THREE.MeshLambertMaterial({ color: 0xd8a87a }));
+          head.position.y = 1.5;
+          g.add(head);
+          g.position.set(cx + dirZ * t + dirX * back, lift, cz + dirX * t + dirZ * back);
+          g3.scene.add(g);
+          people.push({ g, base: lift, phase: Math.random() * 6.28,
+                        speed: 0.7 + Math.random() * 0.8 });
+        }
+      }
+    }
+    // the two long sides, then behind each goal
+    stand(0,  halfH3, 0,  1, W * S3 * 0.96, 26);
+    stand(0, -halfH3, 0, -1, W * S3 * 0.96, 26);
+    stand( halfW3, 0, 1, 0, H * S3 * 0.9, 14);
+    stand(-halfW3, 0, -1, 0, H * S3 * 0.9, 14);
+
+    // a terrace slab under them so they are not floating
+    [[0, halfH3 + 6, W * S3 * 1.1, 12], [0, -halfH3 - 6, W * S3 * 1.1, 12],
+     [halfW3 + 6, 0, 12, H * S3 * 1.05], [-halfW3 - 6, 0, 12, H * S3 * 1.05]
+    ].forEach(function(s){
+      const slab = new THREE.Mesh(
+        new THREE.BoxGeometry(s[2], 7, s[3]),
+        new THREE.MeshLambertMaterial({ color: 0x24303a })
+      );
+      slab.position.set(s[0], 1.2, s[1]);
+      g3.scene.add(slab);
+    });
+    g3.crowd = people;
+  }
+
+  function updateCrowd(dt, now){
+    if(!g3.crowd) return;
+    if(crowdCheerT > 0) crowdCheerT -= dt;
+    const hype = crowdCheerT > 0 ? 1 : 0;
+    for(const c of g3.crowd){
+      const t = now * 0.001 * c.speed + c.phase;
+      const bob  = Math.sin(t) * 0.12;
+      const jump = hype ? Math.max(0, Math.sin(t * 6)) * 1.5 : 0;
+      c.g.position.y = c.base + bob + jump;
+      c.g.rotation.y = Math.sin(t * 0.5) * 0.3;
+    }
+  }
+
+  /* ---- pride flag ----
+     A proper little cloth: a grid of points held by distance constraints, with
+     the top edge pinned to the pole and a wind force blowing through it. */
+  const FLAG_COLS = 14, FLAG_ROWS = 9;
+  const FLAG_W = 11, FLAG_H = 7;
+  const PRIDE = [0xe40303, 0xff8c00, 0xffed00, 0x008026, 0x004dff, 0x750787];
+
+  function buildFlag(x, z){
+    const pts = [];
+    const dx = FLAG_W / (FLAG_COLS - 1), dy = FLAG_H / (FLAG_ROWS - 1);
+    for(let r = 0; r < FLAG_ROWS; r++){
+      for(let c = 0; c < FLAG_COLS; c++){
+        pts.push({ x: c * dx, y: -r * dy, z: 0, px: c * dx, py: -r * dy, pz: 0,
+                   pin: c === 0 });
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    const tri = (FLAG_COLS - 1) * (FLAG_ROWS - 1) * 2;
+    const pos = new Float32Array(tri * 3 * 3);
+    const col = new Float32Array(tri * 3 * 3);
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    const mesh = new THREE.Mesh(geo,
+      new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }));
+    mesh.position.set(x, 0, z);
+    g3.scene.add(mesh);
+
+    const pole = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.16, 0.16, FLAG_H + 9, 8),
+      new THREE.MeshLambertMaterial({ color: 0x8d8d8d })
+    );
+    pole.position.set(x, (FLAG_H + 9) / 2, z);
+    g3.scene.add(pole);
+
+    return { pts, geo, mesh, pos, col, dx, dy, top: FLAG_H + 8 };
+  }
+
+  function updateFlag(f, dt, now){
+    const step = Math.min(dt, 1/40);
+    const wind = 9 + Math.sin(now * 0.0011) * 5;
+    for(const p of f.pts){
+      if(p.pin){ p.x = 0; p.y = -(f.pts.indexOf(p) / FLAG_COLS | 0) * f.dy; p.z = 0; continue; }
+      // verlet: the previous position carries the velocity
+      const vx = (p.x - p.px) * 0.985, vy = (p.y - p.py) * 0.985, vz = (p.z - p.pz) * 0.985;
+      p.px = p.x; p.py = p.y; p.pz = p.z;
+      p.x += vx;
+      p.y += vy - 16 * step * step * 60;
+      p.z += vz + (wind * step * step * 60) * (0.6 + 0.4 * Math.sin(p.y * 0.7 + now * 0.004));
+    }
+    // hold the weave together
+    for(let it = 0; it < 3; it++){
+      for(let r = 0; r < FLAG_ROWS; r++){
+        for(let c = 0; c < FLAG_COLS; c++){
+          const i = r * FLAG_COLS + c;
+          if(c + 1 < FLAG_COLS) relax(f.pts[i], f.pts[i + 1], f.dx);
+          if(r + 1 < FLAG_ROWS) relax(f.pts[i], f.pts[i + FLAG_COLS], f.dy);
+        }
+      }
+    }
+    // rebuild the triangles
+    let k = 0, kc = 0;
+    for(let r = 0; r < FLAG_ROWS - 1; r++){
+      const band = new THREE.Color(PRIDE[Math.min(PRIDE.length - 1,
+                     Math.floor(r / (FLAG_ROWS - 1) * PRIDE.length))]);
+      for(let c = 0; c < FLAG_COLS - 1; c++){
+        const a = f.pts[r * FLAG_COLS + c],     b = f.pts[r * FLAG_COLS + c + 1];
+        const d = f.pts[(r+1) * FLAG_COLS + c], e = f.pts[(r+1) * FLAG_COLS + c + 1];
+        [a, b, d, b, e, d].forEach(function(p){
+          f.pos[k++] = p.x; f.pos[k++] = p.y + f.top; f.pos[k++] = p.z;
+          f.col[kc++] = band.r; f.col[kc++] = band.g; f.col[kc++] = band.b;
+        });
+      }
+    }
+    f.geo.attributes.position.needsUpdate = true;
+    f.geo.attributes.color.needsUpdate = true;
+  }
+
+  function relax(a, b, rest){
+    const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+    const d = Math.hypot(dx, dy, dz) || 1;
+    const k = ((d - rest) / d) * 0.5;
+    const mx = dx * k, my = dy * k, mz = dz * k;
+    if(!a.pin){ a.x += mx; a.y += my; a.z += mz; }
+    if(!b.pin){ b.x -= mx; b.y -= my; b.z -= mz; }
+  }
+
+  /* ---- goal nets in 3D ---- */
+  function buildNet3d(side, gx, dir){
+    const halfW3 = (GOAL_WIDTH / 2) * S3;
+    const hgt = GOAL_H3;
+    const segs = [];
+    const geo = new THREE.BufferGeometry();
+    // one line per row and per column of the cloth grid
+    const lines = (NET_ROWS * (NET_COLS - 1) + NET_COLS * (NET_ROWS - 1));
+    const pos = new Float32Array(lines * 2 * 3);
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const mesh = new THREE.LineSegments(geo,
+      new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.45 }));
+    g3.scene.add(mesh);
+    return { side, gx, dir, halfW3, hgt, geo, pos, mesh };
+  }
+
+  function updateNet3d(n){
+    const net = nets[n.side];
+    const p = n.pos;
+    let k = 0;
+    const node = (c, r) => {
+      const z = -n.halfW3 + (c / (NET_COLS - 1)) * n.halfW3 * 2;
+      const y = n.hgt - (r / (NET_ROWS - 1)) * n.hgt;
+      const bulge = net.disp[r * NET_COLS + c] * S3;
+      const x = n.gx - n.dir * (GOAL_DEPTH * S3) - n.dir * bulge;
+      return [x, y, z];
+    };
+    for(let r = 0; r < NET_ROWS; r++){
+      for(let c = 0; c < NET_COLS - 1; c++){
+        const a = node(c, r), b = node(c + 1, r);
+        p[k++]=a[0]; p[k++]=a[1]; p[k++]=a[2];
+        p[k++]=b[0]; p[k++]=b[1]; p[k++]=b[2];
+      }
+    }
+    for(let c = 0; c < NET_COLS; c++){
+      for(let r = 0; r < NET_ROWS - 1; r++){
+        const a = node(c, r), b = node(c, r + 1);
+        p[k++]=a[0]; p[k++]=a[1]; p[k++]=a[2];
+        p[k++]=b[0]; p[k++]=b[1]; p[k++]=b[2];
+      }
+    }
+    n.geo.attributes.position.needsUpdate = true;
+  }
+
+  /* ---- a proper football skin for the 3D ball ---- */
+  function ballTexture(){
+    const c = document.createElement('canvas');
+    c.width = 256; c.height = 128;
+    const x = c.getContext('2d');
+    x.fillStyle = '#fffdf4';
+    x.fillRect(0, 0, 256, 128);
+    x.fillStyle = '#20301c';
+    for(let i = 0; i < 7; i++){
+      const cx = 18 + i * 36, cy = i % 2 ? 40 : 88;
+      x.beginPath();
+      for(let k = 0; k < 5; k++){
+        const a = -Math.PI/2 + k * Math.PI*2/5;
+        const px = cx + Math.cos(a) * 15, py = cy + Math.sin(a) * 15;
+        if(k === 0) x.moveTo(px, py); else x.lineTo(px, py);
+      }
+      x.closePath();
+      x.fill();
+    }
+    x.strokeStyle = 'rgba(60,60,50,0.35)';
+    x.lineWidth = 2;
+    for(let i = 0; i < 8; i++){
+      x.beginPath(); x.moveTo(i * 32, 0); x.lineTo(i * 32 + 16, 128); x.stroke();
+    }
+    return new THREE.CanvasTexture(c);
+  }
+
+  /* ---- name tags in 3D ----
+     A little canvas per player turned into a sprite that always faces you. */
+  function nameSprite(text, colour){
+    const c = document.createElement('canvas');
+    c.width = 256; c.height = 64;
+    const x = c.getContext('2d');
+    x.font = 'bold 34px "Segoe UI", sans-serif';
+    x.textAlign = 'center';
+    x.textBaseline = 'middle';
+    x.lineWidth = 7;
+    x.strokeStyle = 'rgba(0,0,0,0.75)';
+    x.strokeText(text, 128, 34);
+    x.fillStyle = colour || '#ffffff';
+    x.fillText(text, 128, 34);
+    const tex = new THREE.CanvasTexture(c);
+    const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true }));
+    spr.scale.set(5.2, 1.3, 1);
+    return spr;
+  }
+
+  /* ---- the crowd throwing things when someone scores ---- */
+  function buildCheerBits(){
+    const n = 260;
+    const geo = new THREE.BufferGeometry();
+    const pos = new Float32Array(n * 3);
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const mat = new THREE.PointsMaterial({ color: 0xffd76a, size: 1.1,
+                                           transparent: true, opacity: 0.95 });
+    const pts = new THREE.Points(geo, mat);
+    pts.visible = false;
+    g3.scene.add(pts);
+    return { pts, geo, pos, n, bits: new Array(n).fill(null), live: 0 };
+  }
+
+  // launched from the stands, so they rain in over the pitch
+  function throwCheerBits(){
+    const cb = g3.cheer;
+    if(!cb) return;
+    const halfW3 = (W * S3) / 2, halfH3 = (H * S3) / 2;
+    for(let i = 0; i < cb.n; i++){
+      const side = i % 4;
+      let x, z;
+      if(side === 0){ x = (Math.random()-0.5) * halfW3 * 2; z =  halfH3 + 4; }
+      else if(side === 1){ x = (Math.random()-0.5) * halfW3 * 2; z = -halfH3 - 4; }
+      else if(side === 2){ x =  halfW3 + 4; z = (Math.random()-0.5) * halfH3 * 2; }
+      else { x = -halfW3 - 4; z = (Math.random()-0.5) * halfH3 * 2; }
+      cb.bits[i] = {
+        x, y: 6 + Math.random() * 4, z,
+        vx: -Math.sign(x) * (0.15 + Math.random() * 0.35),
+        vy: 0.9 + Math.random() * 0.7,
+        vz: -Math.sign(z) * (0.15 + Math.random() * 0.35),
+        life: 2.6 + Math.random() * 1.4
+      };
+    }
+    cb.live = cb.n;
+    cb.pts.visible = true;
+  }
+
+  function updateCheerBits(dt){
+    const cb = g3.cheer;
+    if(!cb || !cb.live) return;
+    let alive = 0;
+    for(let i = 0; i < cb.n; i++){
+      const b = cb.bits[i];
+      if(!b){ cb.pos[i*3+1] = -999; continue; }
+      b.life -= dt;
+      if(b.life <= 0){ cb.bits[i] = null; cb.pos[i*3+1] = -999; continue; }
+      b.vy -= 2.2 * dt;
+      b.x += b.vx; b.y += b.vy; b.z += b.vz;
+      if(b.y < 0.2){ b.y = 0.2; b.vy = 0; b.vx *= 0.9; b.vz *= 0.9; }
+      cb.pos[i*3] = b.x; cb.pos[i*3+1] = b.y; cb.pos[i*3+2] = b.z;
+      alive++;
+    }
+    cb.live = alive;
+    cb.pts.visible = alive > 0;
+    cb.geo.attributes.position.needsUpdate = true;
+  }
 
   function makePlayerMesh(p){
     const group = new THREE.Group();
@@ -2909,6 +3422,13 @@
     ring.visible = false;
     group.add(ring);
 
+    if(p.name){
+      const tag = nameSprite(p.name, p.role === 'GK' ? '#cfe9d4' : '#ffffff');
+      tag.position.y = r * 5.4;
+      group.add(tag);
+      group.userData = { body, head, nose, ring, tag, base:r };
+      return group;
+    }
     group.userData = { body, head, nose, ring, base:r };
     return group;
   }
@@ -2955,7 +3475,7 @@
     [[FIELD_MARGIN, 1], [W - FIELD_MARGIN, -1]].forEach(function(pair){
       const gx = pair[0], dir = pair[1];
       const halfW3 = (GOAL_WIDTH / 2) * S3;
-      const hgt = 2.6, depth = GOAL_DEPTH * S3, th = 0.22;
+      const hgt = GOAL_H3, depth = GOAL_DEPTH * S3, th = 0.22;
       const frame = new THREE.Group();
       [-halfW3, halfW3].forEach(function(zz){
         const post = new THREE.Mesh(new THREE.BoxGeometry(th, hgt, th), postMat);
@@ -2965,14 +3485,12 @@
       const bar = new THREE.Mesh(new THREE.BoxGeometry(th, th, halfW3 * 2), postMat);
       bar.position.set(0, hgt, 0);
       frame.add(bar);
-      const net = new THREE.Mesh(
-        new THREE.BoxGeometry(depth, hgt, halfW3 * 2),
-        new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.16 })
-      );
-      net.position.set(-dir * depth / 2, hgt / 2, 0);
-      frame.add(net);
+      // side panels, so the goal reads as a box from any angle
+      [[-1, 1]].forEach(function(){});
       frame.position.x = wx(gx);
       g3.scene.add(frame);
+      // the back of the net is simulated cloth, built in world space
+      g3.nets3d.push(buildNet3d(gx === FIELD_MARGIN ? 'left' : 'right', wx(gx), dir));
     });
 
     // players and ball
@@ -2983,8 +3501,8 @@
     });
 
     g3.ball = new THREE.Mesh(
-      new THREE.SphereGeometry(ball.radius * S3, 18, 14),
-      new THREE.MeshLambertMaterial({ color: 0xfff6e0 })
+      new THREE.SphereGeometry(ball.radius * S3, 20, 16),
+      new THREE.MeshLambertMaterial({ map: ballTexture() })
     );
     g3.scene.add(g3.ball);
 
@@ -2995,6 +3513,13 @@
     );
     g3.ballShadow.rotation.x = -Math.PI / 2;
     g3.scene.add(g3.ballShadow);
+
+    buildCrowd();
+    g3.cheer = buildCheerBits();
+    g3.flags = [
+      buildFlag(-(W * S3) / 2 - 9, -(H * S3) / 2 - 4),
+      buildFlag( (W * S3) / 2 + 9,  (H * S3) / 2 + 4)
+    ];
 
     g3.ready = true;
     resize3d();
@@ -3050,6 +3575,12 @@
     g3.ballShadow.position.set(wx(ball.x), 0.04, wz(ball.y));
     const shrink = 1 - Math.min(ball.z / 90, 1) * 0.5;
     g3.ballShadow.scale.setScalar(Math.max(0.3, shrink));
+
+    const now = performance.now();
+    for(const n of g3.nets3d) updateNet3d(n);
+    updateCrowd(dt, now);
+    updateCheerBits(dt);
+    if(g3.flags) for(const fl of g3.flags) updateFlag(fl, dt, now);
 
     g3.renderer.render(g3.scene, g3.camera);
   }
@@ -3166,6 +3697,7 @@
       if(hudTimer > 0.5){ hudTimer = 0; updatePossessionHud(); }
     }
     updateParticles(dt);
+    updateNets(dt);
 
     // ---- render ----
     ctx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
@@ -3284,6 +3816,7 @@
     possession = [0, 0];
     particles.length = 0;
     resetPowerups();
+    resetNets();
     celebration = null;
     kickoffTimer = 1.2;
     updateScore(null);
@@ -3296,6 +3829,7 @@
   });
 
   assignHair();
+  assignNames();
   applyMode();
   requestAnimationFrame(gameLoop);
 })();

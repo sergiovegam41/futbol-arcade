@@ -16,6 +16,16 @@ Los jugadores son formas simples (cuerpo, cabeza y una cuña que marca hacia dó
 
 Si three.js no carga, el botón lo dice y el juego se queda en 2D: la página nunca depende del CDN para ser jugable.
 
+## Estadio y detalle
+
+- **Plantillas con nombre.** Cada jugador se llama algo: KK, Penélope, El Tanque, Pantufla, Don Cangrejo… Los arqueros tienen su propio bombo de nombres (Manotas, El Muro, Palomita). Se reparten sin repetir al empezar, salen sobre la cabeza y **el gol anuncia al goleador** — o al del gol en propia, que también se reconoce.
+- **Redes con física.** El fondo de cada arco es una tela simulada: una malla de puntos sujeta por muelles que se arrastran entre vecinos. El balón entra con su velocidad como impulso, así que un tirito hace ondas y un cañonazo la revienta. Se ve en las dos vistas.
+- **Césped de verdad.** Franjas de corte con el brillo del rodillo, miles de briznas y zonas desgastadas donde un campo se pela: bocas de gol, puntos de penal y círculo central.
+- **Grada con público.** Cuatro tribunas de gente simple y cabezona que se balancea sola y **salta cuando hay gol**, cada uno a su ritmo para que la grada ondee.
+- **Estrellas al gol.** Al marcar, el público lanza cosas desde las cuatro tribunas y caen sobre el campo.
+- **Bandera arcoíris con tela simulada.** Dos mástiles con banderas hechas de puntos y restricciones de distancia, ancladas al mástil y empujadas por un viento que va y viene.
+- **Balón texturizado** en 3D, con sus paneles, que rueda de verdad.
+
 ## Modos
 
 Al empezar eliges rival: **👥 Un amigo** (dos mandos o teclado compartido) o **🤖 La máquina**, con tres niveles.
@@ -50,6 +60,7 @@ Conecta hasta dos mandos (el navegador los detecta solo después de que presione
 | Tiro al arco (mantén para cargar) | `A` | `Espacio` | `Enter` |
 | Tiro fuerte (mantén) | `B` | `F` | `/` |
 | Tiro con rosca | `B` + `RB` | `F` + `C` | `/` + `Shift` der. |
+| Pase alto (chip) | `X` + `RB` | `E` + `C` | `.` + `Shift` der. |
 | Centro / pase alto | `A` + `RB` | `Espacio` + `C` | `Enter` + `Shift` der. |
 | Pase (con balón) / Barrida (sin balón) | `X` | `E` | `.` |
 | Encarar / robar | `Y` o `LT` | `R` | `,` |
