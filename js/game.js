@@ -736,7 +736,7 @@
     // the net takes the hit before anything is reset, so the bulge matches
     // the shot that actually went in
     const speed = Math.hypot(ball.vx, ball.vy);
-    if(netSide) netImpulse(netSide, ball.y, ball.z, speed);
+    const hitY = ball.y, hitZ = ball.z;
 
     // whoever touched it last gets the credit — or the blame
     const toucher = ballOwner;
@@ -762,9 +762,13 @@
     }
     // the replay holds the freeze; if there is no history yet, carry on as before
     const scorerName = who ? (own ? who + ' (en propia)' : who) : null;
-    if(startReplay(netSide, scorerName)){
+    if(startReplay(netSide, scorerName, speed, hitY, hitZ)){
+      // the net is punched when the REPLAY reaches the moment of impact, not
+      // now — otherwise it has finished bouncing before you get to see it
+      resetNets();
       kickoffTimer = 0;
     } else {
+      if(netSide) netImpulse(netSide, hitY, hitZ, speed);
       kickoffTimer = 1.8;
       resetPositions();
     }
@@ -3217,7 +3221,8 @@
   const replay = {
     buf: new Float32Array(REPLAY_FRAMES * REPLAY_STRIDE),
     count: 0, head: 0,
-    active: false, t: 0, span: 0, side: null, scorer: null
+    active: false, t: 0, span: 0, side: null, scorer: null,
+    power: 0, hitY: 0, hitZ: 0, punched: false
   };
 
   function recordFrame(){
@@ -3256,9 +3261,15 @@
     ball.vx = 0; ball.vy = 0; ball.vz = 0;
   }
 
-  function startReplay(side, scorer){
+  const REPLAY_HOLD = 1.5;   // seconds held on the net after the ball arrives
+
+  function startReplay(side, scorer, power, hitY, hitZ){
     if(replay.count < 30) return false;
     replay.active = true;
+    replay.punched = false;
+    replay.power = power || 12;
+    replay.hitY = hitY || H/2;
+    replay.hitZ = hitZ || 0;
     replay.t = 0;
     replay.span = Math.min(REPLAY_SHOW, replay.count / REPLAY_FPS);
     replay.side = side;
@@ -3268,10 +3279,20 @@
 
   function updateReplay(dt){
     replay.t += dt * REPLAY_SPEED;
+
     if(replay.t >= replay.span){
-      replay.active = false;
-      resetPositions();
-      kickoffTimer = 1.2;
+      // hold on the last frame: the ball sits in the net and the cloth
+      // finishes its bounce, which is the shot worth watching
+      applyFrame(0);
+      if(!replay.punched){
+        netImpulse(replay.side, replay.hitY, replay.hitZ, replay.power);
+        replay.punched = true;
+      }
+      if(replay.t >= replay.span + REPLAY_HOLD){
+        replay.active = false;
+        resetPositions();
+        kickoffTimer = 1.2;
+      }
       return;
     }
     // walk from the oldest shown frame towards the newest
@@ -3312,7 +3333,7 @@
     ctx.fillStyle = 'rgba(255,255,255,0.22)';
     ctx.fillRect(px, py - 2, pw, 4);
     ctx.fillStyle = 'rgba(255,255,255,0.9)';
-    ctx.fillRect(px, py - 2, pw * Math.min(1, replay.t / replay.span), 4);
+    ctx.fillRect(px, py - 2, pw * Math.min(1, replay.t / (replay.span + REPLAY_HOLD)), 4);
     ctx.textAlign = 'center';
   }
 
@@ -3725,6 +3746,49 @@
     if(obj.children) for(const c of obj.children) enableShadows(c, cast, receive);
   }
 
+  /* ---- replay camera ----
+     The wide match camera is useless for this: the net moving a couple of world
+     units is invisible from up there. So the replay gets its own camera that
+     starts behind the shot, swings round the goal and closes right in, framing
+     the point where the ball meets the net. */
+  function replayCamera(dt){
+    const goalX = wx(replay.side === 'left' ? FIELD_MARGIN : W - FIELD_MARGIN);
+    const inward = replay.side === 'left' ? 1 : -1;
+    const bx = wx(ball.x), bz = wz(ball.y), by = Math.max(0, ball.z) * S3;
+
+    // progress through the replay, including the hold at the end
+    const total = replay.span + REPLAY_HOLD;
+    const prog  = Math.min(1, replay.t / total);
+
+    // orbit round the goal mouth, tightening and dropping as it goes
+    const swing  = -inward * (0.55 + prog * 1.25);
+    const radius = 30 - prog * 17;            // 30 -> 13 world units
+    const height = 11 - prog * 6.5;           // 11 -> 4.5
+
+    const cx = goalX + inward * radius * Math.cos(swing) * 0.85;
+    const cz = bz * 0.55 + radius * Math.sin(swing);
+    g3.camera.position.set(cx, height, cz);
+
+    // look at the ball, but drift towards the goal line so the net stays framed
+    const lx = bx + (goalX - bx) * 0.55;
+    g3.camera.lookAt(lx, by + 1.4, bz * 0.7);
+
+    // a tighter lens as it closes in
+    const fov = 42 - prog * 12;
+    if(Math.abs(g3.camera.fov - fov) > 0.01){
+      g3.camera.fov = fov;
+      g3.camera.updateProjectionMatrix();
+    }
+  }
+
+  function restoreMatchCamera(){
+    if(!g3.ready) return;
+    if(g3.camera.fov !== 42){
+      g3.camera.fov = 42;
+      g3.camera.updateProjectionMatrix();
+    }
+  }
+
   function makePlayerMesh(p){
     const group = new THREE.Group();
     const col   = new THREE.Color(p.role === 'GK' ? '#f3f5f0' : p.color);
@@ -3894,6 +3958,10 @@
   function draw3d(dt){
     if(!g3.ready) return;
 
+    if(replay.active){
+      replayCamera(dt);
+    } else {
+    restoreMatchCamera();
     // camera: a medium-high angle that drifts with the play instead of
     // following it tightly, so you keep your bearings
     const tx = wx(ball.x) * 0.45;
@@ -3903,6 +3971,7 @@
     g3.camZ += (tz - g3.camZ) * k;
     g3.camera.position.set(g3.camX, 62, g3.camZ + 58);
     g3.camera.lookAt(g3.camX * 0.6, 0, g3.camZ - 4);
+    }
 
     for(const it of g3.players){
       const p = it.p, m = it.m, ud = m.userData;

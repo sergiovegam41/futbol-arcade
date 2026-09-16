@@ -29,6 +29,10 @@ La vista 3D es un partido de noche, y la luz es lo que la sostiene:
 
 Cada frame de juego se guarda en un búfer circular (solo posiciones). Al marcar, el partido se congela y se repiten los últimos segundos **a cámara lenta**, con letterbox, el piloto rojo de REC y el nombre del goleador.
 
+La cámara de partido no sirve para esto —desde ahí arriba la red moviéndose un par de unidades es invisible—, así que la repetición **tiene su propia cámara**: arranca detrás del disparo, orbita el arco y se va cerrando hasta quedar a ras de campo (de 62 a 4.5 de altura, cerrando el ángulo de 42° a 30°), enfocando justo donde el balón se encuentra con la malla. Al acabar vuelve sola a la cámara de partido.
+
+La red **no se abomba al marcar, sino cuando la repetición llega a ese instante**: si no, termina de rebotar antes de que lo veas. Y al llegar el balón se mantiene el plano un segundo y medio para que se vea la tela hundirse y volver.
+
 **El reloj se para durante la repetición**, así que nunca te roba tiempo de partido: 2.1 segundos de jugada se ven en 5 segundos reales y el marcador del tiempo no se mueve.
 
 ## Estadio y detalle
