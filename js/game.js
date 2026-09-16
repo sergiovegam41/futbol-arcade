@@ -8,8 +8,21 @@
   const ctx = canvas.getContext('2d');
   // Logical game coordinates stay fixed; the canvas is resized to fit the screen
   const W = 1600, H = 900;
-  const wrap = document.getElementById('canvas-wrap');
+  const wrap     = document.getElementById('canvas-wrap');
+  const stageEl  = document.getElementById('stage');
+  const canvas3d = document.getElementById('game3d');
+  let viewW = 0, viewH = 0;   // css px the stage currently occupies
 
+  // Declared up here on purpose: resizeCanvas() runs during start-up and calls
+  // resize3d(), which would hit the temporal dead zone if these lived further
+  // down with the rest of the 3D code.
+  let view3d = false;
+  const g3 = { ready:false, renderer:null, scene:null, camera:null,
+               players:[], ball:null, camX:0, camZ:0 };
+
+  // The stage gets an EXPLICIT pixel size. Letting it size itself from the
+  // canvas while the canvas sized itself from the stage was circular, and the
+  // box collapsed to nothing — which is what blanked the pitch.
   function resizeCanvas(){
     const availW = wrap.clientWidth;
     const availH = wrap.clientHeight;
@@ -20,6 +33,13 @@
       displayH = availH;
       displayW = displayH * aspect;
     }
+    if(!(displayW > 0) || !(displayH > 0)) return;
+    viewW = displayW; viewH = displayH;
+
+    if(stageEl){
+      stageEl.style.width  = displayW + 'px';
+      stageEl.style.height = displayH + 'px';
+    }
     const dpr = window.devicePixelRatio || 1;
     canvas.style.width = displayW + 'px';
     canvas.style.height = displayH + 'px';
@@ -27,6 +47,8 @@
     canvas.height = Math.round(displayH * dpr);
     scaleX = dpr * (displayW / W);
     scaleY = dpr * (displayH / H);
+
+    if(typeof resize3d === 'function') resize3d();
   }
   let scaleX = 1, scaleY = 1;
   window.addEventListener('resize', () => { resizeCanvas(); if(typeof resize3d === 'function') resize3d(); });
@@ -2842,12 +2864,6 @@
      stays in 2D, so the page never depends on the CDN to be playable.
      ========================================================= */
   const S3 = 0.085;                       // game px -> world units
-  const canvas3d = document.getElementById('game3d');
-  const stage    = document.getElementById('stage');
-
-  let view3d = false;
-  const g3 = { ready:false, renderer:null, scene:null, camera:null,
-               players:[], ball:null, camX:0, camZ:0 };
 
   function has3d(){ return typeof THREE !== 'undefined' && !!canvas3d; }
 
@@ -2986,9 +3002,10 @@
 
   function resize3d(){
     if(!g3.ready) return;
-    const wpx = canvas.clientWidth  || canvas.width;
-    const hpx = canvas.clientHeight || canvas.height;
-    if(wpx < 2 || hpx < 2) return;
+    // use the size resizeCanvas already worked out, not a measurement of an
+    // absolutely-positioned canvas that may still report zero
+    const wpx = viewW, hpx = viewH;
+    if(!(wpx > 1) || !(hpx > 1)) return;
     g3.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     g3.renderer.setSize(wpx, hpx, false);
     canvas3d.style.width  = wpx + 'px';
@@ -3042,7 +3059,7 @@
     if(want && !g3.ready) init3d();
     view3d = want && g3.ready;
     if(canvas3d) canvas3d.hidden = !view3d;
-    if(stage) stage.classList.toggle('mode3d', view3d);
+    if(stageEl) stageEl.classList.toggle('mode3d', view3d);
     if(view3d) resize3d();
   }
 
