@@ -6,6 +6,16 @@ Juego de fútbol arcade para dos jugadores en el mismo equipo, hecho con HTML, C
 
 ---
 
+## Vista 2D / 3D
+
+En el menú eliges cómo mirar el partido: **▦ 2D cenital** (el clásico) o **🎥 3D**, una cámara en ángulo medio-superior hecha con [three.js](https://threejs.org/) que acompaña la jugada.
+
+Es solo una forma distinta de *ver* lo mismo: la simulación no cambia. Sigue corriendo en sus coordenadas de 1600×900 y el 3D las mapea a  del mundo, usando la **altura real del balón** que ya existía — así que los centros colgados describen su parábola de verdad, con la sombra quedándose en el césped para que sepas dónde va a caer. El césped 3D reutiliza el mismo canvas donde se dibujan las líneas en 2D, así que ambas vistas comparten el terreno.
+
+Los jugadores son formas simples (cuerpo, cabeza y una cuña que marca hacia dónde miran), se tumban al barrer y el arquero se vuelve traslúcido cuando se le escapa un balón, igual que en 2D.
+
+Si three.js no carga, el botón lo dice y el juego se queda en 2D: la página nunca depende del CDN para ser jugable.
+
 ## Modos
 
 Al empezar eliges rival: **👥 Un amigo** (dos mandos o teclado compartido) o **🤖 La máquina**, con tres niveles.

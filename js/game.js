@@ -29,7 +29,7 @@
     scaleY = dpr * (displayH / H);
   }
   let scaleX = 1, scaleY = 1;
-  window.addEventListener('resize', resizeCanvas);
+  window.addEventListener('resize', () => { resizeCanvas(); if(typeof resize3d === 'function') resize3d(); });
   window.addEventListener('orientationchange', resizeCanvas);
   resizeCanvas();
   setTimeout(resizeCanvas, 0);
@@ -2832,6 +2832,221 @@
   }
 
   /* =========================================================
+     3D view
+     The simulation is untouched: it keeps running in its own 1600x900 pitch
+     coordinates and this is purely a second way of LOOKING at it. Game (x, y)
+     maps to world (x, z) and the ball's existing height becomes real Y, so
+     crosses arc through the air for free.
+
+     If three.js fails to load the flag simply never turns on and the game
+     stays in 2D, so the page never depends on the CDN to be playable.
+     ========================================================= */
+  const S3 = 0.085;                       // game px -> world units
+  const canvas3d = document.getElementById('game3d');
+  const stage    = document.getElementById('stage');
+
+  let view3d = false;
+  const g3 = { ready:false, renderer:null, scene:null, camera:null,
+               players:[], ball:null, camX:0, camZ:0 };
+
+  function has3d(){ return typeof THREE !== 'undefined' && !!canvas3d; }
+
+  function wx(x){ return (x - W/2) * S3; }   // pitch x  -> world x
+  function wz(y){ return (y - H/2) * S3; }   // pitch y  -> world z
+
+  function makePlayerMesh(p){
+    const group = new THREE.Group();
+    const col   = new THREE.Color(p.role === 'GK' ? '#f3f5f0' : p.color);
+    const r     = p.radius * S3;
+
+    const body = new THREE.Mesh(
+      new THREE.CylinderGeometry(r * 0.78, r, r * 3.1, 14),
+      new THREE.MeshLambertMaterial({ color: col })
+    );
+    body.position.y = r * 1.55;
+    group.add(body);
+
+    const head = new THREE.Mesh(
+      new THREE.SphereGeometry(r * 0.72, 14, 10),
+      new THREE.MeshLambertMaterial({ color: '#e8b98c' })
+    );
+    head.position.y = r * 3.5;
+    group.add(head);
+
+    // a small wedge so you can read which way he is facing
+    const nose = new THREE.Mesh(
+      new THREE.ConeGeometry(r * 0.30, r * 0.9, 8),
+      new THREE.MeshLambertMaterial({ color: '#ffffff' })
+    );
+    nose.rotation.x = Math.PI / 2;
+    nose.position.set(0, r * 2.2, r * 1.0);
+    group.add(nose);
+
+    // ring under the player you are controlling
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(r * 1.35, r * 1.75, 22),
+      new THREE.MeshBasicMaterial({ color: '#f2c14e', side: THREE.DoubleSide,
+                                    transparent: true, opacity: 0.95 })
+    );
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.05;
+    ring.visible = false;
+    group.add(ring);
+
+    group.userData = { body, head, nose, ring, base:r };
+    return group;
+  }
+
+  function init3d(){
+    if(g3.ready || !has3d()) return;
+
+    g3.renderer = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: true });
+    g3.renderer.setClearColor(0x07120c, 1);
+
+    g3.scene = new THREE.Scene();
+    g3.scene.fog = new THREE.Fog(0x07120c, 120, 260);
+
+    g3.camera = new THREE.PerspectiveCamera(42, 16/9, 1, 500);
+
+    g3.scene.add(new THREE.HemisphereLight(0xcfe9d4, 0x16301f, 0.95));
+    const sun = new THREE.DirectionalLight(0xffffff, 0.65);
+    sun.position.set(30, 90, 40);
+    g3.scene.add(sun);
+
+    // the pitch: the very same canvas the 2D view draws its lines on
+    if(!fieldCache) buildFieldCache();
+    const tex = new THREE.CanvasTexture(fieldCache);
+    tex.anisotropy = 4;
+    const pitch = new THREE.Mesh(
+      new THREE.PlaneGeometry(W * S3, H * S3),
+      new THREE.MeshLambertMaterial({ map: tex })
+    );
+    pitch.rotation.x = -Math.PI / 2;
+    g3.scene.add(pitch);
+    g3.pitchTex = tex;
+
+    // a bit of ground around the touchlines so the pitch is not floating
+    const surround = new THREE.Mesh(
+      new THREE.PlaneGeometry(W * S3 * 2.1, H * S3 * 2.6),
+      new THREE.MeshLambertMaterial({ color: 0x102a1b })
+    );
+    surround.rotation.x = -Math.PI / 2;
+    surround.position.y = -0.15;
+    g3.scene.add(surround);
+
+    // goal frames
+    const postMat = new THREE.MeshLambertMaterial({ color: 0xf7f7f2 });
+    [[FIELD_MARGIN, 1], [W - FIELD_MARGIN, -1]].forEach(function(pair){
+      const gx = pair[0], dir = pair[1];
+      const halfW3 = (GOAL_WIDTH / 2) * S3;
+      const hgt = 2.6, depth = GOAL_DEPTH * S3, th = 0.22;
+      const frame = new THREE.Group();
+      [-halfW3, halfW3].forEach(function(zz){
+        const post = new THREE.Mesh(new THREE.BoxGeometry(th, hgt, th), postMat);
+        post.position.set(0, hgt/2, zz);
+        frame.add(post);
+      });
+      const bar = new THREE.Mesh(new THREE.BoxGeometry(th, th, halfW3 * 2), postMat);
+      bar.position.set(0, hgt, 0);
+      frame.add(bar);
+      const net = new THREE.Mesh(
+        new THREE.BoxGeometry(depth, hgt, halfW3 * 2),
+        new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.16 })
+      );
+      net.position.set(-dir * depth / 2, hgt / 2, 0);
+      frame.add(net);
+      frame.position.x = wx(gx);
+      g3.scene.add(frame);
+    });
+
+    // players and ball
+    g3.players = allPlayers().map(p => {
+      const m = makePlayerMesh(p);
+      g3.scene.add(m);
+      return { p, m };
+    });
+
+    g3.ball = new THREE.Mesh(
+      new THREE.SphereGeometry(ball.radius * S3, 18, 14),
+      new THREE.MeshLambertMaterial({ color: 0xfff6e0 })
+    );
+    g3.scene.add(g3.ball);
+
+    // a blob on the grass under the ball, so height stays readable
+    g3.ballShadow = new THREE.Mesh(
+      new THREE.CircleGeometry(ball.radius * S3, 16),
+      new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.32 })
+    );
+    g3.ballShadow.rotation.x = -Math.PI / 2;
+    g3.scene.add(g3.ballShadow);
+
+    g3.ready = true;
+    resize3d();
+  }
+
+  function resize3d(){
+    if(!g3.ready) return;
+    const wpx = canvas.clientWidth  || canvas.width;
+    const hpx = canvas.clientHeight || canvas.height;
+    if(wpx < 2 || hpx < 2) return;
+    g3.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    g3.renderer.setSize(wpx, hpx, false);
+    canvas3d.style.width  = wpx + 'px';
+    canvas3d.style.height = hpx + 'px';
+    g3.camera.aspect = wpx / hpx;
+    g3.camera.updateProjectionMatrix();
+  }
+
+  function draw3d(dt){
+    if(!g3.ready) return;
+
+    // camera: a medium-high angle that drifts with the play instead of
+    // following it tightly, so you keep your bearings
+    const tx = wx(ball.x) * 0.45;
+    const tz = wz(ball.y) * 0.30;
+    const k = Math.min(1, dt * 2.4);
+    g3.camX += (tx - g3.camX) * k;
+    g3.camZ += (tz - g3.camZ) * k;
+    g3.camera.position.set(g3.camX, 62, g3.camZ + 58);
+    g3.camera.lookAt(g3.camX * 0.6, 0, g3.camZ - 4);
+
+    for(const it of g3.players){
+      const p = it.p, m = it.m, ud = m.userData;
+      m.position.set(wx(p.x), 0, wz(p.y));
+      const ang = Math.atan2(p.facing.x, p.facing.y);
+      m.rotation.y = ang;
+
+      const down  = p.downTimer > 0;
+      const slide = p.slideTimer > 0;
+      // lie him down for a slide or while he is on the floor
+      m.rotation.x = (down || slide) ? -Math.PI / 2.4 : 0;
+      ud.ring.visible = (p.role !== 'GK') &&
+                        (teamOf(p).outfield[teamOf(p).controlledIndex] === p);
+      const beaten = p.role === 'GK' && p.beatenTimer > 0;
+      ud.body.material.opacity = beaten ? 0.3 : 1;
+      ud.body.material.transparent = beaten;
+    }
+
+    const bz = Math.max(0, ball.z) * S3;
+    g3.ball.position.set(wx(ball.x), bz + ball.radius * S3, wz(ball.y));
+    g3.ball.rotation.x += Math.hypot(ball.vx, ball.vy) * 0.05;
+    g3.ballShadow.position.set(wx(ball.x), 0.04, wz(ball.y));
+    const shrink = 1 - Math.min(ball.z / 90, 1) * 0.5;
+    g3.ballShadow.scale.setScalar(Math.max(0.3, shrink));
+
+    g3.renderer.render(g3.scene, g3.camera);
+  }
+
+  function setView(is3d){
+    const want = is3d && has3d();
+    if(want && !g3.ready) init3d();
+    view3d = want && g3.ready;
+    if(canvas3d) canvas3d.hidden = !view3d;
+    if(stage) stage.classList.toggle('mode3d', view3d);
+    if(view3d) resize3d();
+  }
+
+  /* =========================================================
      Loop
      ========================================================= */
   function formatTime(t){
@@ -2943,17 +3158,31 @@
       ctx.translate((Math.random()-0.5) * shake, (Math.random()-0.5) * shake);
     }
 
-    if(!fieldCache || fieldCacheKey !== canvas.width + 'x' + canvas.height) buildFieldCache();
-    ctx.drawImage(fieldCache, 0, 0, W, H);
-    drawGoals();
-    drawTeam(team1);
-    drawTeam(team2);
-    drawBall();
-    drawPowerups();
-    drawKickoffCountdown();
-    drawCelebration(paused ? 0 : dt);
-    drawParticles();   // above the celebration panel, so confetti reads on top
-    if(paused) drawPauseVeil();
+    if(!fieldCache || fieldCacheKey !== canvas.width + 'x' + canvas.height){
+      buildFieldCache();
+      if(g3.pitchTex) g3.pitchTex.needsUpdate = true;
+    }
+
+    if(view3d){
+      // three.js draws the match; the 2D canvas stays on top for the overlays
+      draw3d(dt);
+      ctx.clearRect(0, 0, W, H);
+      drawKickoffCountdown();
+      drawCelebration(paused ? 0 : dt);
+      if(celebration && celebration.big) drawParticles();   // final confetti
+      if(paused) drawPauseVeil();
+    } else {
+      ctx.drawImage(fieldCache, 0, 0, W, H);
+      drawGoals();
+      drawTeam(team1);
+      drawTeam(team2);
+      drawBall();
+      drawPowerups();
+      drawKickoffCountdown();
+      drawCelebration(paused ? 0 : dt);
+      drawParticles();   // above the celebration panel, so confetti reads on top
+      if(paused) drawPauseVeil();
+    }
 
     requestAnimationFrame(gameLoop);
   }
@@ -2961,6 +3190,24 @@
   /* =========================================================
      Start / options
      ========================================================= */
+  // ---- 2D or 3D ----
+  const viewSeg = document.getElementById('view-seg');
+  if(viewSeg){
+    viewSeg.addEventListener('click', e => {
+      const btn = e.target.closest('button');
+      if(!btn) return;
+      const want3d = btn.dataset.view === '3d';
+      if(want3d && !has3d()){
+        // three.js did not load: say so instead of silently doing nothing
+        flashStatus('La vista 3D no está disponible (no cargó three.js)');
+        return;
+      }
+      viewSeg.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      setView(want3d);
+    });
+  }
+
   // ---- who is player 2: a friend on the couch, or the machine ----
   const modeSeg  = document.getElementById('mode-seg');
   const levelSeg = document.getElementById('level-seg');

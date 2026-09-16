@@ -40,7 +40,10 @@
   </div>
 
   <div id="canvas-wrap">
-    <canvas id="game"></canvas>
+    <div id="stage">
+      <canvas id="game3d" hidden></canvas>
+      <canvas id="game"></canvas>
+    </div>
   </div>
 
   <div id="pad-status">
@@ -92,6 +95,14 @@
   </div>
 
   <div class="option-row">
+    <span class="option-label">Vista</span>
+    <div class="seg" id="view-seg">
+      <button data-view="2d" class="active">▦ 2D cenital</button>
+      <button data-view="3d">🎥 3D</button>
+    </div>
+  </div>
+
+  <div class="option-row">
     <span class="option-label">Rival</span>
     <div class="seg" id="mode-seg">
       <button data-mode="2p" class="active">👥 Un amigo</button>
@@ -121,6 +132,7 @@
   <div id="footer-note">Los navegadores detectan los mandos solo después de que presiones un botón en cada uno. Pausa con <kbd>P</kbd> o <kbd>Esc</kbd>.</div>
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="js/game.js"></script>
 </body>
 </html>
