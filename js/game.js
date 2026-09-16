@@ -113,6 +113,16 @@
     if(capturedKeys.includes(e.code)) e.preventDefault();
     if(e.repeat){ keys[e.code] = true; return; }
     keys[e.code] = true;
+    if(e.code === 'KeyN'){ toggleMute(); return; }
+    // with the menu up the keys drive the menu and nothing else
+    if(uiOpen()){
+      if(e.code === 'ArrowUp')    { uiMove(-1,  0); return; }
+      if(e.code === 'ArrowDown')  { uiMove( 1,  0); return; }
+      if(e.code === 'ArrowLeft')  { uiMove( 0, -1); return; }
+      if(e.code === 'ArrowRight') { uiMove( 0,  1); return; }
+      if(e.code === 'Enter' || e.code === 'Space'){ uiActivate(); return; }
+      return;
+    }
     if(intro.active){ skipIntro(); sfx.whistle(); return; }
     if(replay.active || goalAction > 0){ if(skipCelebration()) return; }
     if(e.code === 'KeyQ') manualSwitch(team1);
@@ -162,10 +172,14 @@
       [0, 150, 300].forEach(ms => setTimeout(() => blip(1400, 0.16, 'sine', 0.05), ms));
     }
   };
-  soundBtn.addEventListener('click', () => {
+  function toggleMute(){
     soundOn = !soundOn;
     soundBtn.textContent = soundOn ? '🔊' : '🔇';
-  });
+    soundBtn.title = soundOn ? 'Silenciar (N o Back)' : 'Activar sonido (N o Back)';
+    flashStatus(soundOn ? 'Sonido activado' : 'Silencio');
+  }
+  soundBtn.title = 'Silenciar (N o Back)';
+  soundBtn.addEventListener('click', toggleMute);
 
   /* =========================================================
      Crowd ambience
@@ -237,6 +251,17 @@
     return Math.min(1, 0.18 + prox * 0.75 + shot);
   }
 
+  const AMB_DUCK = 0.20;   // how loud the crowd is while the ball is in play
+
+  // The ground is background, not a soundtrack. While the ball is in play it
+  // ducks right down under the kicks and the whistle — you should barely notice
+  // it is there. It only opens up when there is something to open up for: a
+  // goal, the replay of it, the celebration.
+  function ambienceVolume(){
+    const loud = goalAction > 0 || replay.active || celebration || crowdCheerT > 0;
+    return loud ? 1 : AMB_DUCK;
+  }
+
   function updateAmbience(dt){
     if(!amb.on || !audioCtx) return;
     if(!soundOn){
@@ -249,9 +274,10 @@
     const rate = amb.target > amb.excite ? 2.6 : 0.7;
     amb.excite += (amb.target - amb.excite) * Math.min(1, dt * rate);
 
-    const e = amb.excite;
-    amb.murmurGain.gain.value = 0.035 + e * 0.05;
-    amb.cheerGain.gain.value  = Math.max(0, e - 0.35) * 0.115;
+    const vol = ambienceVolume();
+    const e   = amb.excite;
+    amb.murmurGain.gain.value = (0.035 + e * 0.05) * vol;
+    amb.cheerGain.gain.value  = Math.max(0, e - 0.35) * 0.115 * vol;
     amb.murmur.frequency.value = 480 + e * 340;
     amb.cheer.frequency.value  = 820 + e * 620;
   }
@@ -1062,11 +1088,9 @@
     teams.forEach((team, i) => {
       const pad = readPadInput(i);
       if(pad){
-        // any action button gets you out of the intro or the goal sequence
-        if(pad.kick || pad.power || pad.pass || pad.switchBtn){
-          if(intro.active){ skipIntro(); sfx.whistle(); return; }
-          if(replay.active || goalAction > 0){ if(skipCelebration()) return; }
-        }
+        // NOTE: skipping the intro and the goal sequence used to live here, and
+        // it could not work — step() does not run during either of them, so the
+        // pad was never read. It is in pollUiPad() now, off the render loop.
         if(pad.switchBtn && !padPrevSwitch[i]) manualSwitch(team);
         padPrevSwitch[i] = pad.switchBtn;
         const rMag = Math.hypot(pad.rsx, pad.rsy);
@@ -1077,6 +1101,116 @@
         padPrevRStick[i] = false;
       }
     });
+  }
+
+  /* =========================================================
+     UI input — menu navigation, mute, and skipping the cinematics
+     Everything here has one thing in common: it has to work when the match loop
+     is NOT running. pollGamepadSwitch() lives inside step(), and step() is
+     skipped during the intro, the goal action and the replay — so the pad could
+     never get you out of any of them. This is polled from the render loop, so
+     it always answers, and every press is edge-triggered: holding a button down
+     does one thing once, instead of blowing through the whole goal sequence in
+     two frames.
+     ========================================================= */
+  const uiPrev = { any:false, up:false, down:false, left:false, right:false,
+                   ok:false, mute:false };
+
+  function padUiState(){
+    const pads = getGamepads();
+    const st = { any:false, up:false, down:false, left:false, right:false,
+                 ok:false, mute:false };
+    for(let i = 0; i < 2; i++){
+      const gp = pads[i];
+      if(!gp) continue;
+      const btn = n => !!(gp.buttons[n] && gp.buttons[n].pressed);
+      const ax  = gp.axes.length >= 2 ? gp.axes[0] : 0;
+      const ay  = gp.axes.length >= 2 ? gp.axes[1] : 0;
+      st.up    = st.up    || btn(12) || ay < -0.55;
+      st.down  = st.down  || btn(13) || ay >  0.55;
+      st.left  = st.left  || btn(14) || ax < -0.55;
+      st.right = st.right || btn(15) || ax >  0.55;
+      st.ok    = st.ok    || btn(0)  || btn(9);        // A or Start
+      st.mute  = st.mute  || btn(8);                   // Back / Select
+      // the face buttons and LB skip a cinematic; the triggers do not, because
+      // you hold sprint permanently and that is not a request to skip anything
+      st.any   = st.any || btn(0) || btn(1) || btn(2) || btn(3) || btn(4) || btn(9);
+    }
+    return st;
+  }
+
+  // ---- the start overlay, driven by keys or by a pad ----
+  let uiRow = 0, uiCol = 0;
+
+  function uiRows(){
+    const rows = [];
+    for(const id of ['view-seg', 'mode-seg', 'level-seg', 'len-seg']){
+      const el = document.getElementById(id);
+      if(!el) continue;
+      const row = el.closest ? el.closest('.option-row') : null;
+      if(row && row.hidden) continue;          // the difficulty row comes and goes
+      const bs = Array.prototype.slice.call(el.querySelectorAll('button'));
+      if(bs.length) rows.push(bs);
+    }
+    if(startBtn) rows.push([startBtn]);
+    return rows;
+  }
+
+  function uiOpen(){ return !!overlay && !overlay.classList.contains('hidden'); }
+
+  function uiPaint(){
+    const all = document.querySelectorAll('#overlay button');
+    Array.prototype.forEach.call(all, b => b.classList.remove('ui-focus'));
+    if(!uiOpen()) return;
+    const rows = uiRows();
+    if(!rows.length) return;
+    uiRow = Math.max(0, Math.min(rows.length - 1, uiRow));
+    uiCol = Math.max(0, Math.min(rows[uiRow].length - 1, uiCol));
+    rows[uiRow][uiCol].classList.add('ui-focus');
+  }
+
+  function uiMove(dr, dc){
+    const rows = uiRows();
+    if(!rows.length) return;
+    if(dr){
+      uiRow = (uiRow + dr + rows.length) % rows.length;
+      uiCol = Math.min(uiCol, rows[uiRow].length - 1);
+    }
+    if(dc){
+      const n = rows[uiRow].length;
+      uiCol = (uiCol + dc + n) % n;
+    }
+    uiPaint();
+  }
+
+  function uiActivate(){
+    const rows = uiRows();
+    if(!rows.length) return;
+    const btn = rows[uiRow][uiCol];
+    if(btn) btn.click();
+    uiPaint();          // picking "la máquina" adds a row, so redraw the cursor
+  }
+
+  // Called every frame from the render loop, whatever else is going on.
+  function pollUiPad(){
+    const st = padUiState();
+
+    if(st.mute && !uiPrev.mute) toggleMute();
+
+    if(uiOpen()){
+      if(st.up    && !uiPrev.up)    uiMove(-1,  0);
+      if(st.down  && !uiPrev.down)  uiMove( 1,  0);
+      if(st.left  && !uiPrev.left)  uiMove( 0, -1);
+      if(st.right && !uiPrev.right) uiMove( 0,  1);
+      if(st.ok    && !uiPrev.ok)    uiActivate();
+    } else if(st.any && !uiPrev.any && running && !paused){
+      if(intro.active){ skipIntro(); sfx.whistle(); }
+      else if(replay.active || goalAction > 0) skipCelebration();
+    }
+
+    uiPrev.any  = st.any;  uiPrev.up   = st.up;   uiPrev.down = st.down;
+    uiPrev.left = st.left; uiPrev.right = st.right;
+    uiPrev.ok   = st.ok;   uiPrev.mute = st.mute;
   }
 
   /* =========================================================
@@ -3665,11 +3799,13 @@
       return true;
     }
     if(goalAction > 0){
+      // Skipping the ball-in-the-net beat must NOT throw the goal away. It used
+      // to drop pendingGoal on the floor, which is why the replay "sometimes"
+      // never appeared: anyone holding a button through the celebration was
+      // silently cancelling it. Cut straight to the replay instead — a second
+      // press then takes you to the kick-off.
       goalAction = 0;
-      pendingGoal = null;
-      celebration = null;
-      resetPositions();
-      kickoffTimer = 1.2;
+      finishGoal();
       return true;
     }
     return false;
@@ -4511,6 +4647,103 @@
     return m;
   }
 
+  /* ---- the fire power, in 3D ----
+     This only ever existed on the top-down canvas. In the 3D view the orb was
+     literally invisible: it sat somewhere on the pitch, you picked it up by
+     accident, and your only clue was the shot coming out orange afterwards.
+     Here it is a real object — a burning core inside a halo, turning and
+     bobbing and throwing light onto the grass — plus a ring under whoever is
+     carrying it that closes up as the fifteen seconds run out. */
+  function buildPowerOrb(){
+    const g = new THREE.Group();
+
+    const core = new THREE.Mesh(
+      new THREE.IcosahedronGeometry(1.5, 1),
+      new THREE.MeshBasicMaterial({ color: 0xffe0a0, transparent: true })
+    );
+    g.add(core);
+
+    const halo = new THREE.Mesh(
+      new THREE.SphereGeometry(2.6, 16, 12),
+      new THREE.MeshBasicMaterial({ color: 0xff7a22, transparent: true,
+                                    opacity: 0.32, depthWrite: false })
+    );
+    g.add(halo);
+
+    // a flat ring on the grass: from a low camera the orb can hide behind a
+    // player, and this still tells you where it is
+    const pad = new THREE.Mesh(
+      new THREE.RingGeometry(2.6, 3.7, 28),
+      new THREE.MeshBasicMaterial({ color: 0xff9a3c, side: THREE.DoubleSide,
+                                    transparent: true, opacity: 0.5,
+                                    depthWrite: false })
+    );
+    pad.rotation.x = -Math.PI / 2;
+    g.add(pad);
+
+    const lamp = new THREE.PointLight(0xff8a33, 1.6, 30, 2);
+    g.add(lamp);
+
+    g.visible = false;
+    g3.scene.add(g);
+    return { g, core, halo, pad, lamp };
+  }
+
+  function updatePowerOrb(){
+    const o = g3.orb;
+    if(!o) return;
+    const pu = powerups[0];
+    if(!pu){ o.g.visible = false; return; }
+
+    o.g.visible = true;
+    const pulse = 1 + Math.sin(pu.phase) * 0.14;
+    // blinks out its last three seconds, the same tell the 2D version gives
+    const fade = pu.life < 3 ? (0.35 + 0.65 * Math.abs(Math.sin(pu.life * 8))) : 1;
+    const y = 2.2 + Math.sin(pu.phase * 0.7) * 0.5;
+
+    o.g.position.set(wx(pu.x), y, wz(pu.y));
+    o.core.rotation.y += 0.05;
+    o.core.rotation.x += 0.02;
+    o.core.scale.setScalar(pulse);
+    o.core.material.opacity = fade;
+    o.halo.scale.setScalar(pulse);
+    o.halo.material.opacity = 0.32 * fade;
+    o.pad.position.y = 0.06 - y;                 // cancels the bob: stays on the grass
+    o.pad.material.opacity = 0.5 * fade;
+    o.lamp.intensity = 1.6 * fade * pulse;
+  }
+
+  function buildFireRing(){
+    const m = new THREE.Mesh(
+      new THREE.RingGeometry(1.6, 2.3, 30),
+      new THREE.MeshBasicMaterial({ color: 0xffae3c, side: THREE.DoubleSide,
+                                    transparent: true, opacity: 0.9,
+                                    depthWrite: false })
+    );
+    m.rotation.x = -Math.PI / 2;
+    m.visible = false;
+    g3.scene.add(m);
+    return m;
+  }
+
+  function updateFireRings(){
+    if(!g3.fireRings) return;
+    for(const team of teams){
+      const ring = g3.fireRings[team.isP1 ? 0 : 1];
+      if(team.powerup !== 'fire'){ ring.visible = false; continue; }
+      const p = getControlled(team);
+      ring.visible = true;
+      ring.position.set(wx(p.x), 0.07, wz(p.y));
+      const left = Math.max(0, Math.min(1, team.powerupTimer / PU_HOLD_TIME));
+      ring.scale.setScalar(0.72 + left * 0.38);      // shrinks as the window closes
+      const hot = team.powerupTimer < 4;             // last seconds: red and flashing
+      ring.material.color.setRGB(1, hot ? 0.30 : 0.68, hot ? 0.14 : 0.24);
+      ring.material.opacity = hot
+        ? 0.55 + 0.40 * Math.abs(Math.sin(performance.now() / 110))
+        : 0.9;
+    }
+  }
+
   function updateContainMarks(){
     if(!g3.contain) return;
     for(const team of teams){
@@ -4673,6 +4906,8 @@
     g3.bars = [buildPowerBar(), buildPowerBar()];
     g3.trail = buildBallTrail();
     g3.contain = [buildContainMark(), buildContainMark()];
+    g3.orb = buildPowerOrb();
+    g3.fireRings = [buildFireRing(), buildFireRing()];
     buildFloodlights();
     buildStands();
     g3.cheer = buildCheerBits();
@@ -4749,6 +4984,8 @@
     updatePowerBars();
     updateBallTrail();
     updateContainMarks();
+    updatePowerOrb();
+    updateFireRings();
     updateCheerBits(dt);
     if(g3.flags) for(const fl of g3.flags) updateFlag(fl, dt, now);
 
@@ -4796,6 +5033,7 @@
     finalScoreEl.textContent = 'AZUL ' + score1 + '  —  ' + score2 + ' ROJO';
     startBtn.textContent = 'Jugar otra vez';
     overlay.classList.remove('hidden');
+    uiRow = uiRows().length - 1; uiCol = 0; uiPaint();   // cursor on 'Jugar otra vez'
   }
 
   function togglePause(){
@@ -4867,6 +5105,8 @@
     if(!lastTs) lastTs = ts;
     const dt = Math.min((ts - lastTs) / 1000, 0.05);
     lastTs = ts;
+
+    pollUiPad();   // menu, mute and skips: works whether or not the match ticks
 
     if(running && !paused && intro.active){
       updateIntro(dt);
@@ -4952,6 +5192,7 @@
 
   function applyMode(){
     if(levelRow) levelRow.hidden = !cpuMode;
+    uiPaint();
     if(p2Col)  p2Col.style.display = cpuMode ? 'none' : '';
     if(crest2) crest2.textContent = cpuMode ? 'CPU' : 'ROJ';
     if(name2)  name2.textContent  = cpuMode ? ('Máquina · ' + CPU_LEVELS[cpuLevel].name) : 'Jugador 2';
@@ -4993,6 +5234,9 @@
     ensureAudio();
     overlay.classList.add('hidden');
     finalScoreEl.style.display = 'none';
+    // Enter or Space started the match from the menu, and that same press is
+    // still held — without this it reads as "charge a shot" on the first frame.
+    for(const k in keys) keys[k] = false;
     running = true;
     paused = false;
     pauseBtn.textContent = '⏸';
@@ -5017,6 +5261,7 @@
     if(!intro.active) sfx.whistle();
   });
 
+  uiPaint();
   assignHair();
   assignNames();
   applyMode();

@@ -228,3 +228,11 @@ button#start-btn:active{transform:translateY(0) scale(.99);}
   .team-name,.team-sub{display:none;}
   .controls-col{min-width:0;width:100%;}
 }
+
+/* Cursor de navegacion con teclado o mando dentro del menu de inicio. */
+#overlay button.ui-focus{
+  outline:2px solid var(--gold);
+  outline-offset:3px;
+  box-shadow:0 0 0 5px rgba(242,193,78,0.20);
+}
+#overlay button.ui-focus:not(.active){color:var(--gold);}

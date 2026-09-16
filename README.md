@@ -20,7 +20,9 @@ Si three.js no carga, el botón lo dice y el juego se queda en 2D: la página nu
 
 El público se oye y **reacciona a lo que pasa**: un murmullo constante de fondo y una capa más brillante que solo se abre según el balón se acerca a un arco. Medido, de 19% de intensidad en el medio campo a 93% dentro del área. Sube rápido y baja despacio, como una grada de verdad. Al marcar hay un rugido aparte.
 
-Está **sintetizado, no grabado**: una grabación serían megas de audio que descargar, licenciar y cachear, y que además se notaría el bucle. Esto son unas líneas de Web Audio que nunca se repiten y no pesan nada. Se apaga con el botón 🔊.
+Está **sintetizado, no grabado**: una grabación serían megas de audio que descargar, licenciar y cachear, y que además se notaría el bucle. Esto son unas líneas de Web Audio que nunca se repiten y no pesan nada.
+
+**Mientras se juega el público va muy bajo** (al 20% de su volumen), por debajo de los golpeos y el silbato: es ambiente, no banda sonora. Solo se abre del todo cuando hay motivo — un gol, su repetición, la celebración. Se silencia todo con el botón 🔊, con la tecla `N` o con el botón **Back** del mando.
 
 ## Física del balón
 
@@ -56,7 +58,9 @@ La cámara de partido no sirve para esto —desde ahí arriba la red moviéndose
 
 La red **no se abomba al marcar, sino cuando la repetición llega a ese instante**: si no, termina de rebotar antes de que lo veas. Y al llegar el balón se mantiene el plano un segundo y medio para que se vea la tela hundirse y volver.
 
-**Se puede saltar**: cualquier tecla o botón de acción corta la secuencia del gol, esté el balón todavía en la red o corriendo la repetición, y devuelve la cámara de partido. Saltando, el gol se resuelve en 0.3 s en vez de 11.
+**Se puede saltar, y en dos pasos**: la primera pulsación corta el balón dentro de la red y te lleva **a la repetición**; la segunda corta la repetición y va al saque. Saltando, el gol se resuelve en menos de medio segundo en vez de 11.
+
+Esto arregla dos bugs que se notaban en el mando. El primero: saltar la celebración tiraba el gol pendiente a la basura, así que quien apretara un botón durante el festejo **cancelaba la repetición sin enterarse** — de ahí que "no siempre saliera". El segundo: el mando solo se leía dentro del paso de simulación, que no corre ni durante la intro ni durante la repetición, así que **con mando era imposible saltarlas** (con teclado sí funcionaba). Ahora el mando se lee desde el bucle de render, siempre, y cada pulsación cuenta **por flanco**: tener el botón hundido hace una cosa una vez, en vez de atravesar toda la secuencia en dos frames.
 
 **El reloj se para durante la repetición**, así que nunca te roba tiempo de partido: 2.1 segundos de jugada se ven en 5 segundos reales y el marcador del tiempo no se mueve.
 
@@ -97,6 +101,8 @@ La máquina no hace trampa: no lee el estado interno ni recibe ventajas de físi
 - **Control cerrado:** mientras la llevas, el balón va pegado al pie y no se escapa solo al girar o esprintar.
 - **Arquero con criterio:** se queda en pie y achica de costado ante la mayoría de remates, y solo se estira cuando la pelota le queda realmente lejos. Sale del área a cortar balones sueltos y, si la atrapa, la reparte a un compañero.
 - **Poderes raros:** de vez en cuando cae un 🔥 **tiro de fuego** en el campo. El primero que lo toca se lo lleva para su equipo y **su siguiente tiro con `B`** sale en llamas, más fuerte y casi imparable. Solo lo gasta el tiro fuerte —pasar o rematar con `A` no lo consume— y caduca a los 15 s: el aro naranja alrededor del jugador marca cuánto queda.
+
+  En 3D **era invisible**: solo estaba dibujado en el canvas cenital, así que el orbe estaba ahí tirado en el campo, lo recogías por accidente y tu única pista era que el tiro salía naranja después. Ahora es un objeto de verdad — un núcleo ardiendo dentro de un halo, girando, flotando y tirando luz sobre el césped, con un aro plano en el pasto para verlo aunque un jugador lo tape, y parpadeando sus últimos tres segundos. Quien lo lleva arrastra un aro que **se va cerrando** según se gasta la ventana de 15 s y se pone rojo intermitente al final.
 - **Barra de potencia también en 3D**, flotando sobre el jugador con la zona ideal marcada.
 - **Vibración del mando** al disparar cerca del arco y cuando te encaran para robarte el balón, más **temblor de pantalla** en los remates al área.
 - Duración configurable (2, 3 o 5 minutos), posesión en vivo, repeticiones de gol con celebración y sonido generado por Web Audio.
@@ -120,6 +126,10 @@ Conecta hasta dos mandos (el navegador los detecta solo después de que presione
 | Cambiar al más cercano de la línea | `LB` | `Q` | `M` |
 | Elegir por dirección | Palanca derecha | — | — |
 | Pausa | — | `P` o `Esc` | `P` o `Esc` |
+| Saltar intro / repetición | `A` `B` `X` `Y` `LB` `Start` | cualquier tecla | cualquier tecla |
+| Silenciar | `Back` | `N` | `N` |
+| Moverse por el menú | Cruceta / palanca izq. | flechas | flechas |
+| Confirmar en el menú | `A` o `Start` | `Enter` o `Espacio` | `Enter` o `Espacio` |
 
 ### Notas de juego
 
