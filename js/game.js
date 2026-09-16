@@ -175,6 +175,7 @@
       sprintMult: 1.62,
       kickCooldown: 0,
       lungeTimer: 0,
+      lungeCd: 0,
       beatenTimer: 0,
       slideTimer: 0,
       downTimer: 0,
@@ -436,7 +437,7 @@
       team.gk.state = 'idle'; team.gk.stateTimer = 0;
       for(const pl of team.outfield){
         pl.x = pl.home.x; pl.y = pl.home.y; pl.vx = 0; pl.vy = 0; pl.lungeTimer = 0;
-        pl.slideTimer = 0; pl.downTimer = 0;
+        pl.slideTimer = 0; pl.downTimer = 0; pl.lungeCd = 0;
       }
     }
     ball.x = W/2; ball.y = H/2; ball.vx = 0; ball.vy = 0; ball.spin = 0;
@@ -1485,10 +1486,11 @@
     // is unambiguous — running never turns a shot into a lofted ball.
     const modHeld = !!input.modifier;
     const containing = !!input.contain;
-    const spd = p.speed * 1.1
-              * (sprinting ? p.sprintMult : 1)
-              * (p.lungeTimer > 0 ? 1.5 : 1)
-              * (containing ? 1.12 : 1);       // close down a touch quicker
+    // The lunge is an ALTERNATIVE burst, not a bonus on top of sprinting:
+    // multiplying them let a player reach 2.4x speed just by mashing the shoot
+    // button with no ball, which was faster than anything else in the game.
+    const burst = Math.max(sprinting ? p.sprintMult : 1, p.lungeTimer > 0 ? 1.5 : 1);
+    const spd = p.speed * 1.1 * burst * (containing ? 1.12 : 1);
     team.sprintInput = sprinting;
 
     p.vx = nx * spd;
@@ -1502,6 +1504,7 @@
 
     if(p.kickCooldown > 0) p.kickCooldown -= dt;
     if(p.lungeTimer   > 0) p.lungeTimer   -= dt;
+    if(p.lungeCd      > 0) p.lungeCd      -= dt;
     if(team.passCooldown > 0) team.passCooldown -= dt;
 
     // pressing the shoot button is also how you go up for a high ball
@@ -1556,7 +1559,7 @@
         shotShake(team, p, power);
         if(sweet) flashStatus('¡Golpeo perfecto!');
       } else {
-        p.lungeTimer = 0.22;
+        startLunge(p);
       }
       team.charge = 0;
       team.chargeHeld = false;
@@ -1584,7 +1587,7 @@
         shotRumble(team, p, power);
         shotShake(team, p, power);
       } else {
-        p.lungeTimer = 0.22;   // no ball nearby: burst forward as a tackle/lunge
+        startLunge(p);   // no ball nearby: burst forward as a tackle/lunge
       }
       team.charge = 0;
       team.chargeHeld = false;
@@ -1613,6 +1616,17 @@
         speed: 0.8, life: 0.35, size: 3, color: 'rgba(160,210,165,0.55)'
       });
     }
+  }
+
+  // A burst you can spam is just a speed boost, so it has to cost something:
+  // once used it is locked out for LUNGE_COOLDOWN seconds.
+  const LUNGE_TIME     = 0.22;
+  const LUNGE_COOLDOWN = 0.85;
+
+  function startLunge(p){
+    if(p.lungeCd > 0) return;
+    p.lungeTimer = LUNGE_TIME;
+    p.lungeCd    = LUNGE_COOLDOWN;
   }
 
   function clampToPitch(p){
