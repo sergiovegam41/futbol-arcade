@@ -34,6 +34,12 @@ La vista 3D es un partido de noche, y la luz es lo que la sostiene:
 - **Luz principal cálida más relleno frío** desde el lado opuesto, para que las caras en sombra no queden negras del todo.
 - **Corrección de color sRGB y tono ACES**, que es lo que evita que los colores saturados se quemen.
 
+## Entrada del partido
+
+En 3D, el saque no empieza en seco: la cámara entra baja detrás de un arco, recorre la cancha a ras de césped y sube hasta la posición de partido, abriendo el objetivo de 34° a 42°. Mientras tanto salen los nombres de los dos equipos y el modo.
+
+El reloj **no arranca hasta que termina**, el campo está congelado, y cualquier botón la salta.
+
 ## Repetición del gol
 
 Cada frame de juego se guarda en un búfer circular (solo posiciones). Al marcar, el partido se congela y se repiten los últimos segundos **a cámara lenta**, con letterbox, el piloto rojo de REC y el nombre del goleador.

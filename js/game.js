@@ -113,6 +113,7 @@
     if(capturedKeys.includes(e.code)) e.preventDefault();
     if(e.repeat){ keys[e.code] = true; return; }
     keys[e.code] = true;
+    if(intro.active){ skipIntro(); sfx.whistle(); return; }
     if(e.code === 'KeyQ') manualSwitch(team1);
     if(e.code === 'KeyM') manualSwitch(team2);
     if(e.code === 'KeyP' || e.code === 'Escape') togglePause();
@@ -3473,6 +3474,115 @@
   }
 
   /* =========================================================
+     Kick-off fly-in
+     A camera move before the whistle: it comes in low behind one goal, skims
+     down the pitch past the halfway line and then climbs into the match
+     position, which is where it hands over. The clock does not start until it
+     is done, and any button skips it.
+     ========================================================= */
+  const intro = { active: false, t: 0, dur: 5.2 };
+
+  function startIntro(){
+    if(!view3d || !g3.ready){ intro.active = false; return; }
+    intro.active = true;
+    intro.t = 0;
+  }
+
+  function skipIntro(){
+    if(!intro.active) return;
+    intro.active = false;
+    kickoffTimer = 1.2;
+  }
+
+  function updateIntro(dt){
+    intro.t += dt;
+    if(intro.t >= intro.dur){
+      intro.active = false;
+      kickoffTimer = 1.2;
+    }
+  }
+
+  const easeInOut = x => x < 0.5 ? 4*x*x*x : 1 - Math.pow(-2*x + 2, 3) / 2;
+  const lerp3 = (a, b, t) => [a[0] + (b[0]-a[0])*t, a[1] + (b[1]-a[1])*t, a[2] + (b[2]-a[2])*t];
+
+  function introCamera(){
+    const halfW3 = (W * S3) / 2;
+    // three beats: behind the goal, along the pitch, up into match position
+    const legs = [
+      { pos: [-halfW3 - 26, 3.4,  10], look: [-halfW3 + 6, 2.2, 0] },
+      { pos: [-6,           9,    34], look: [ 12,        1.5, 0] },
+      { pos: [ halfW3 * 0.35, 30, 52], look: [ 0,         0.5, -2] },
+      { pos: [ 0,           62,   58], look: [ 0,         0,   -4] }
+    ];
+    const p = Math.min(1, intro.t / intro.dur);
+    const seg = Math.min(legs.length - 2, Math.floor(p * (legs.length - 1)));
+    const local = easeInOut(p * (legs.length - 1) - seg);
+
+    const pos  = lerp3(legs[seg].pos,  legs[seg + 1].pos,  local);
+    const look = lerp3(legs[seg].look, legs[seg + 1].look, local);
+    g3.camera.position.set(pos[0], pos[1], pos[2]);
+    g3.camera.lookAt(look[0], look[1], look[2]);
+
+    // a longer lens at the start that opens up as it pulls back
+    const fov = 34 + p * 8;
+    if(Math.abs(g3.camera.fov - fov) > 0.01){
+      g3.camera.fov = fov;
+      g3.camera.updateProjectionMatrix();
+    }
+  }
+
+  function drawIntroFrame(){
+    const p = Math.min(1, intro.t / intro.dur);
+    // cinema bars that slide away at the end
+    const close = p > 0.82 ? (p - 0.82) / 0.18 : 0;
+    const bar = H * 0.11 * (1 - close);
+    if(bar > 1){
+      ctx.fillStyle = 'rgba(0,0,0,0.88)';
+      ctx.fillRect(0, 0, W, bar);
+      ctx.fillRect(0, H - bar, W, bar);
+    }
+
+    // the two sides announced, sliding in and fading out before kick-off
+    const nameIn = Math.min(1, p / 0.25);
+    const nameOut = p > 0.62 ? 1 - (p - 0.62) / 0.2 : 1;
+    const a = Math.max(0, Math.min(1, nameIn)) * Math.max(0, Math.min(1, nameOut));
+    if(a > 0.01){
+      ctx.save();
+      ctx.globalAlpha = a;
+      ctx.textBaseline = 'middle';
+      ctx.font = '900 62px "Segoe UI", sans-serif';
+
+      const slide = (1 - easeInOut(Math.min(1, p / 0.25))) * 260;
+      ctx.textAlign = 'right';
+      ctx.fillStyle = team1.color;
+      ctx.fillText(team1.name.toUpperCase(), W/2 - 46 - slide, H/2 - 10);
+      ctx.textAlign = 'left';
+      ctx.fillStyle = team2.color;
+      ctx.fillText(team2.name.toUpperCase(), W/2 + 46 + slide, H/2 - 10);
+
+      ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.font = '700 30px "Segoe UI", sans-serif';
+      ctx.fillText('vs', W/2, H/2 - 8);
+      ctx.font = '600 22px "Segoe UI", sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.65)';
+      ctx.fillText(cpuMode ? ('CONTRA LA MÁQUINA · ' + CPU_LEVELS[cpuLevel].name)
+                           : 'DOS JUGADORES', W/2, H/2 + 44);
+      ctx.restore();
+    }
+
+    if(p < 0.9){
+      ctx.save();
+      ctx.globalAlpha = 0.45 + 0.25 * Math.sin(intro.t * 4);
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.font = '600 18px "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('pulsa cualquier botón para saltar', W/2, H - bar/2);
+      ctx.restore();
+    }
+  }
+
+  /* =========================================================
      3D view
      The simulation is untouched: it keeps running in its own 1600x900 pitch
      coordinates and this is purely a second way of LOOKING at it. Game (x, y)
@@ -3858,11 +3968,11 @@
      them the players look pasted onto the pitch instead of standing on it. */
   function buildLighting(){
     // base fill: cool sky bounce, dark ground bounce
-    const hemi = new THREE.HemisphereLight(0xa8cfe6, 0x16321f, 0.62);
+    const hemi = new THREE.HemisphereLight(0xa8cfe6, 0x16321f, 0.42);
     g3.scene.add(hemi);
 
     // the key light: one shadow map for the whole pitch
-    const key = new THREE.DirectionalLight(0xfff3da, 1.15);
+    const key = new THREE.DirectionalLight(0xfff3da, 0.78);
     key.position.set(34, 74, 44);
     key.castShadow = true;
     key.shadow.mapSize.width  = 2048;
@@ -3880,7 +3990,7 @@
     g3.keyLight = key;
 
     // a soft bounce from the opposite side so shadowed faces are not flat black
-    const fill = new THREE.DirectionalLight(0xc3dcff, 0.38);
+    const fill = new THREE.DirectionalLight(0xc3dcff, 0.24);
     fill.position.set(-40, 42, -50);
     g3.scene.add(fill);
 
@@ -3924,7 +4034,7 @@
       g3.scene.add(halo);
 
       // the pool of light it throws — no shadow map, just colour and falloff
-      const spot = new THREE.SpotLight(0xfff4de, 0.85, 240, Math.PI / 4.6, 0.45, 1.2);
+      const spot = new THREE.SpotLight(0xfff4de, 0.42, 230, Math.PI / 4.8, 0.5, 1.3);
       spot.position.set(c[0], 35, c[1]);
       spot.target.position.set(c[0] * 0.28, 0, c[1] * 0.28);
       g3.scene.add(spot);
@@ -4116,7 +4226,7 @@
     if(THREE.sRGBEncoding !== undefined) g3.renderer.outputEncoding = THREE.sRGBEncoding;
     if(THREE.ACESFilmicToneMapping !== undefined){
       g3.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      g3.renderer.toneMappingExposure = 1.45;
+      g3.renderer.toneMappingExposure = 1.08;
     }
 
     g3.scene = new THREE.Scene();
@@ -4230,7 +4340,9 @@
   function draw3d(dt){
     if(!g3.ready) return;
 
-    if(replay.active){
+    if(intro.active){
+      introCamera();
+    } else if(replay.active){
       replayCamera(dt);
     } else {
     restoreMatchCamera();
@@ -4386,7 +4498,9 @@
     const dt = Math.min((ts - lastTs) / 1000, 0.05);
     lastTs = ts;
 
-    if(running && !paused && replay.active){
+    if(running && !paused && intro.active){
+      updateIntro(dt);
+    } else if(running && !paused && replay.active){
       updateReplay(dt);
     } else if(running && !paused){
       step(dt);
@@ -4417,6 +4531,7 @@
       drawCelebration(paused ? 0 : dt);
       if(celebration && celebration.big) drawParticles();   // final confetti
       if(replay.active) drawReplayFrame();
+      if(intro.active) drawIntroFrame();
       if(paused) drawPauseVeil();
     } else {
       ctx.drawImage(fieldCache, 0, 0, W, H);
@@ -4525,7 +4640,8 @@
     poss2El.textContent = 'Posesión 50%';
     timeEl.textContent = formatTime(matchTime);
     statusEl.textContent = '';
-    sfx.whistle();
+    startIntro();
+    if(!intro.active) sfx.whistle();
   });
 
   assignHair();
