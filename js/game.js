@@ -720,11 +720,13 @@
 
   function goalCheck(){
     // left goal — red scores
-    if(ball.x - ball.radius < FIELD_MARGIN - GOAL_DEPTH*0.5 && ball.y > topGoalY && ball.y < botGoalY){
+    // under the bar and between the posts, or it is not a goal
+    const underBar = ball.z < GOAL_H_PX;
+    if(underBar && ball.x - ball.radius < FIELD_MARGIN - GOAL_DEPTH*0.5 && ball.y > topGoalY && ball.y < botGoalY){
       score2++; onGoal(team2, 'left'); return true;
     }
     // right goal — blue scores
-    if(ball.x + ball.radius > W - FIELD_MARGIN + GOAL_DEPTH*0.5 && ball.y > topGoalY && ball.y < botGoalY){
+    if(underBar && ball.x + ball.radius > W - FIELD_MARGIN + GOAL_DEPTH*0.5 && ball.y > topGoalY && ball.y < botGoalY){
       score1++; onGoal(team1, 'right'); return true;
     }
     return false;
@@ -1381,6 +1383,13 @@
     ball.vx = Math.cos(ang) * pw;
     ball.vy = Math.sin(ang) * pw;
     ball.spin = (Math.random() - 0.5) * 0.5 + pw * 0.03;
+    // A struck ball takes its vertical speed FROM the strike. Leaving whatever
+    // vz it happened to have meant a ground shot could inherit a bounce and
+    // sail away upwards, which then made the next touch miss entirely.
+    // A really hard strike does get under it and climb: harmless at range, but
+    // from close in it is what puts a rocket over the bar.
+    ball.vz = pw > 14 ? (pw - 14) * 0.17 : 0;
+    if(ball.vz > 0) ball.z = Math.max(ball.z, 1);
     // flag it as a genuine shot so goalkeepers only commit to real strikes
     ball.curve     = 0;
     ball.shotTimer = 1.3;
@@ -1514,6 +1523,7 @@
     ball.vx = (vx/d) * power;
     ball.vy = (vy/d) * power;
     ball.spin = 0.3;
+    ball.vz = 0;              // a ground pass is a ground pass
     p.kickCooldown = 0.28;
     team.passCooldown = 0.3;
     sfx.pass();
@@ -1555,7 +1565,10 @@
     // 3. bend it back by exactly as much as it takes to close on the mouth
     //    again by the time it gets there — hence solving for the flight time
     //    instead of using a fixed strength that only works at one range.
-    const frames = Math.max(12, gl / sp);
+    //    With quadratic drag the ball is still slowing all the way there, so
+    //    a constant-speed estimate under-counts the flight by ~40% and the
+    //    shot over-bends. This is the closed form for v(t) = v0/(1+k·v0·t).
+    const frames = Math.max(12, (Math.exp(DRAG * gl) - 1) / (DRAG * sp));
     ball.curve = dir * (2 * sp * Math.sin(open)) / frames;
     ball.spin  = dir * 0.9;
   }
@@ -2476,44 +2489,189 @@
     }
   }
 
-  function updateBall(dt){
-    if(ball.shotTimer > 0) ball.shotTimer -= dt;
-    if(ball.releaseGuard > 0) ball.releaseGuard -= dt;
-    if(ball.heldBy){ ball.trail.length = 0; ball.z = 0; ball.vz = 0; return; }
+  /* =========================================================
+     Ball physics
+     Three things the old model got wrong and this one does not:
 
-    // vertical flight
-    if(ball.z > 0 || ball.vz !== 0){
-      ball.z  += ball.vz * dt * 60;
-      ball.vz -= GRAVITY * dt * 60;
-      if(ball.z <= 0){
-        ball.z = 0;
-        if(ball.vz < -1.1){
-          ball.vz = -ball.vz * 0.28;   // one soft hop, then it settles
-          ballLanded();
-        } else {
-          ball.vz = 0;
-          if(ball.loftTeam) ballLanded();
+     1. Drag was a flat multiply per frame, so a rocket and a roller lost the
+        same FRACTION of speed. Real drag grows with the square of speed, so a
+        hard shot bleeds pace fast and then coasts, while a gentle pass keeps
+        trickling. Rolling resistance is separate and only applies on the deck.
+     2. It bounced once and died. Now it has restitution and will bounce a few
+        times, losing height each time, and the ground bite turns some of the
+        spin into roll.
+     3. Posts and the crossbar did not exist — shots went straight through the
+        woodwork and a ball 200px in the air still counted as a goal. Both are
+        now solid, and a goal has to pass under the bar.
+
+     Everything is integrated in substeps, because at 24 px/frame the ball used
+     to skip clean through a post between one frame and the next.
+     ========================================================= */
+  const DRAG        = 0.00075;  // quadratic air drag
+  const ROLL_FRIC   = 0.045;    // rolling resistance, ground only, px/frame^2
+  const BOUNCE_Z    = 0.55;     // how much height it keeps per bounce
+  const BOUNCE_BITE = 0.82;     // ground grabbing the ball on impact
+  const BOUNCE_STOP = 0.55;     // below this vertical speed it settles
+  const POST_R      = 4.5;
+  const POST_REST   = 0.72;     // woodwork gives almost nothing back
+  const WALL_REST   = 0.62;
+
+  function woodwork(side){
+    const gx = side === 'left' ? FIELD_MARGIN : W - FIELD_MARGIN;
+    return { gx, top: topGoalY, bot: botGoalY };
+  }
+
+  // vertical posts, one at each end of the mouth
+  function hitPosts(){
+    for(const side of ['left', 'right']){
+      const g = woodwork(side);
+      for(const py of [g.top, g.bot]){
+        const dx = ball.x - g.gx, dy = ball.y - py;
+        const d  = Math.hypot(dx, dy);
+        const min = ball.radius + POST_R;
+        if(d < min && d > 1e-6 && ball.z < GOAL_H_PX + POST_R){
+          const nx = dx / d, ny = dy / d;
+          ball.x = g.gx + nx * min;
+          ball.y = py   + ny * min;
+          const vn = ball.vx * nx + ball.vy * ny;
+          if(vn < 0){
+            ball.vx -= (1 + POST_REST) * vn * nx;
+            ball.vy -= (1 + POST_REST) * vn * ny;
+            clang();
+          }
+          return true;
         }
       }
     }
-    ball.x += ball.vx * dt * 60;
-    ball.y += ball.vy * dt * 60;
-    const air = ball.z > 4;
-    ball.vx *= air ? 0.997 : ball.friction;
-    ball.vy *= air ? 0.997 : ball.friction;
+    return false;
+  }
 
-    let speed = Math.hypot(ball.vx, ball.vy);
-    // bend: a sideways push perpendicular to travel, fading as the ball slows
-    if(ball.curve !== 0 && speed > 1.2){
-      const nx = ball.vx / speed, ny = ball.vy / speed;
-      ball.vx += -ny * ball.curve * dt * 60;
-      ball.vy +=  nx * ball.curve * dt * 60;
-      ball.curve *= 0.995;   // holds almost all the way, so the arc closes
-      if(Math.abs(ball.curve) < 0.002) ball.curve = 0;
-      speed = Math.hypot(ball.vx, ball.vy);
+  // the crossbar: a horizontal bar across the mouth at goal height
+  function hitCrossbar(){
+    for(const side of ['left', 'right']){
+      const g = woodwork(side);
+      if(ball.y < g.top || ball.y > g.bot) continue;
+      const dx = ball.x - g.gx, dz = ball.z - GOAL_H_PX;
+      const d  = Math.hypot(dx, dz);
+      const min = ball.radius + POST_R;
+      if(d < min && d > 1e-6){
+        const nx = dx / d, nz = dz / d;
+        ball.x = g.gx     + nx * min;
+        ball.z = GOAL_H_PX + nz * min;
+        const vn = ball.vx * nx + ball.vz * nz;
+        if(vn < 0){
+          ball.vx -= (1 + POST_REST) * vn * nx;
+          ball.vz -= (1 + POST_REST) * vn * nz;
+          clang();
+        }
+        return true;
+      }
     }
+    return false;
+  }
+
+  let clangCooldown = 0;
+  function clang(){
+    if(clangCooldown > 0) return;
+    clangCooldown = 0.35;
+    sfx.wall();
+    sfx.kick(0.9);
+    shake = Math.max(shake, 9);
+    flashStatus('¡Al palo!');
+    spawnParticles(ball.x, ball.y, 12, {
+      speed: 3, life: 0.4, size: 3, color: 'rgba(255,240,200,0.9)'
+    });
+  }
+
+  function updateBall(dt){
+    if(ball.shotTimer > 0) ball.shotTimer -= dt;
+    if(ball.releaseGuard > 0) ball.releaseGuard -= dt;
+    if(clangCooldown > 0) clangCooldown -= dt;
+    if(ball.heldBy){ ball.trail.length = 0; ball.z = 0; ball.vz = 0; return; }
+
+    // Substep fast balls. One 24 px hop per frame is wider than a goalpost, so
+    // without this the ball simply teleports past the woodwork.
+    const speed0 = Math.hypot(ball.vx, ball.vy, ball.vz);
+    const steps = Math.max(1, Math.min(6, Math.ceil(speed0 / 5)));
+    const h = (dt * 60) / steps;
+
+    for(let s = 0; s < steps; s++){
+      const grounded = ball.z <= 0.01;
+
+      // ---- vertical ----
+      if(!grounded || ball.vz > 0){
+        ball.z  += ball.vz * h;
+        ball.vz -= GRAVITY * h;
+        if(ball.z <= 0){
+          ball.z = 0;
+          if(-ball.vz > BOUNCE_STOP){
+            ball.vz = -ball.vz * BOUNCE_Z;     // it keeps bouncing, lower each time
+            ball.vx *= BOUNCE_BITE;
+            ball.vy *= BOUNCE_BITE;
+            ballLanded();
+          } else {
+            ball.vz = 0;
+            if(ball.loftTeam) ballLanded();
+          }
+        }
+      }
+
+      // ---- horizontal ----
+      ball.x += ball.vx * h;
+      ball.y += ball.vy * h;
+
+      let sp = Math.hypot(ball.vx, ball.vy);
+      if(sp > 0.0001){
+        // quadratic drag, always; rolling resistance only on the grass
+        let dec = DRAG * sp * sp * h;
+        if(ball.z <= 2) dec += ROLL_FRIC * h;
+        const keep = Math.max(0, 1 - dec / sp);
+        ball.vx *= keep;
+        ball.vy *= keep;
+        sp *= keep;
+      }
+
+      // ---- bend ----
+      if(ball.curve !== 0 && sp > 1.2){
+        const nx = ball.vx / sp, ny = ball.vy / sp;
+        ball.vx += -ny * ball.curve * h;
+        ball.vy +=  nx * ball.curve * h;
+        ball.curve *= Math.pow(0.995, h);
+        if(Math.abs(ball.curve) < 0.002) ball.curve = 0;
+      }
+
+      // ---- woodwork and walls ----
+      hitPosts();
+      hitCrossbar();
+
+      const loud = Math.hypot(ball.vx, ball.vy) > 4;
+      const bounced = () => {
+        if(loud){
+          sfx.wall();
+          spawnParticles(ball.x, ball.y, 5, { speed: 2, life: 0.3, size: 3,
+                                              color: 'rgba(255,255,255,0.6)' });
+        }
+      };
+      if(ball.y - ball.radius < FIELD_MARGIN){
+        ball.y = FIELD_MARGIN + ball.radius; ball.vy *= -WALL_REST; bounced();
+      }
+      if(ball.y + ball.radius > H - FIELD_MARGIN){
+        ball.y = H - FIELD_MARGIN - ball.radius; ball.vy *= -WALL_REST; bounced();
+      }
+      // the mouth is only open below the bar; above it the ball hits the stand
+      const inMouth = ball.y > topGoalY && ball.y < botGoalY && ball.z < GOAL_H_PX;
+      if(ball.x - ball.radius < FIELD_MARGIN && !inMouth){
+        ball.x = FIELD_MARGIN + ball.radius; ball.vx *= -WALL_REST; bounced();
+      }
+      if(ball.x + ball.radius > W - FIELD_MARGIN && !inMouth){
+        ball.x = W - FIELD_MARGIN - ball.radius; ball.vx *= -WALL_REST; bounced();
+      }
+      ball.x = Math.max(FIELD_MARGIN - GOAL_DEPTH, Math.min(W - FIELD_MARGIN + GOAL_DEPTH, ball.x));
+    }
+
+    const speed = Math.hypot(ball.vx, ball.vy);
     ball.spin += speed * 0.035;
-    if(speed < 0.03){ ball.vx = 0; ball.vy = 0; }
+    if(speed < 0.03 && ball.z <= 0){ ball.vx = 0; ball.vy = 0; }
 
     if(ball.shotFire && ball.shotTimer > 0 && speed > 2){
       spawnParticles(ball.x, ball.y, 2, {
@@ -2521,7 +2679,6 @@
         color: Math.random() < 0.5 ? 'rgba(255,170,50,0.95)' : 'rgba(255,70,20,0.9)'
       });
     }
-    // trail for fast shots
     if(speed > 6){
       ball.trail.push({ x: ball.x, y: ball.y, life: 0.25 });
       if(ball.trail.length > 14) ball.trail.shift();
@@ -2530,30 +2687,8 @@
       ball.trail[i].life -= dt;
       if(ball.trail[i].life <= 0) ball.trail.splice(i, 1);
     }
-
-    const bounced = () => {
-      if(speed > 4){
-        sfx.wall();
-        spawnParticles(ball.x, ball.y, 5, { speed: 2, life: 0.3, size: 3, color: 'rgba(255,255,255,0.6)' });
-      }
-    };
-
-    if(ball.y - ball.radius < FIELD_MARGIN){
-      ball.y = FIELD_MARGIN + ball.radius; ball.vy *= -0.62; bounced();
-    }
-    if(ball.y + ball.radius > H - FIELD_MARGIN){
-      ball.y = H - FIELD_MARGIN - ball.radius; ball.vy *= -0.62; bounced();
-    }
-    const inMouth = ball.y > topGoalY && ball.y < botGoalY;
-    if(ball.x - ball.radius < FIELD_MARGIN && !inMouth){
-      ball.x = FIELD_MARGIN + ball.radius; ball.vx *= -0.62; bounced();
-    }
-    if(ball.x + ball.radius > W - FIELD_MARGIN && !inMouth){
-      ball.x = W - FIELD_MARGIN - ball.radius; ball.vx *= -0.62; bounced();
-    }
-    // inside the goal mouth, keep it from leaving the world before goalCheck fires
-    ball.x = Math.max(FIELD_MARGIN - GOAL_DEPTH, Math.min(W - FIELD_MARGIN + GOAL_DEPTH, ball.x));
   }
+
 
   /* =========================================================
      Drawing — pitch
@@ -3355,61 +3490,117 @@
   function wx(x){ return (x - W/2) * S3; }   // pitch x  -> world x
   function wz(y){ return (y - H/2) * S3; }   // pitch y  -> world z
 
-  /* ---- crowd ----
-     Lumpy little people in the stands. They idle with a slow bob and jump when
-     something happens, each on its own offset so the stand ripples instead of
-     moving as one block. */
+  /* ---- the stands ----
+     The first attempt was people hovering over a flat slab, which read as
+     nothing at all. A stand is a staircase: each row sits on its own step, one
+     higher and further back than the last, with a wall at the front, a rail
+     along the top and a roof over it. Build the steps and the crowd falls into
+     place on them.
+     ========================================================= */
   const CROWD_COLORS = ['#d94f3d','#3f7fd1','#e8c04a','#59a86b','#b060c0',
-                        '#e07f3a','#5ec7c7','#c9c9c9','#8a5a3b','#e36fa0'];
+                        '#e07f3a','#5ec7c7','#d8d8d8','#8a5a3b','#e36fa0',
+                        '#4a5fbf','#c0392b','#16a085','#f0f0c0'];
+  const STAND_ROWS  = 7;
+  const STEP_RISE   = 1.5;     // how much each row climbs
+  const STEP_DEPTH  = 2.2;     // and how far back it sits
   let crowdCheerT = 0;
   function crowdCheer(secs){ crowdCheerT = Math.max(crowdCheerT, secs); }
 
-  function buildCrowd(){
+  function buildStands(){
     const people = [];
-    const rows = 4;
     const halfW3 = (W * S3) / 2;
     const halfH3 = (H * S3) / 2;
-    const geoBody = new THREE.CylinderGeometry(0.42, 0.5, 1.2, 6);
-    const geoHead = new THREE.SphereGeometry(0.36, 7, 6);
 
-    function stand(cx, cz, dirX, dirZ, along, count){
-      for(let r = 0; r < rows; r++){
-        for(let i = 0; i < count; i++){
-          const t = (i / (count - 1) - 0.5) * along;
-          const back = r * 2.4 + 2.0;
-          const lift = r * 1.35 + 0.6;
+    const concrete = new THREE.MeshLambertMaterial({ color: 0x5b6570 });
+    const concreteDark = new THREE.MeshLambertMaterial({ color: 0x424b55 });
+    const railMat  = new THREE.MeshLambertMaterial({ color: 0x8d99a6 });
+    const roofMat  = new THREE.MeshLambertMaterial({ color: 0x2c343d });
+    const geoBody  = new THREE.CylinderGeometry(0.34, 0.44, 1.05, 6);
+    const geoHead  = new THREE.SphereGeometry(0.30, 7, 6);
+
+    // one stand: `len` long, starting `gap` back from the touchline.
+    // dir is the outward direction (which way the terrace climbs away).
+    function stand(cx, cz, dirX, dirZ, len, gap, perRow){
+      const alongX = dirZ, alongZ = dirX;   // perpendicular to the outward dir
+
+      // front wall, so the terrace does not float over the grass
+      const wall = new THREE.Mesh(
+        new THREE.BoxGeometry(Math.abs(alongX) * len + Math.abs(dirX) * 1.2,
+                              2.2,
+                              Math.abs(alongZ) * len + Math.abs(dirZ) * 1.2),
+        concreteDark);
+      wall.position.set(cx + dirX * gap, 1.1, cz + dirZ * gap);
+      wall.receiveShadow = true;
+      g3.scene.add(wall);
+
+      for(let r = 0; r < STAND_ROWS; r++){
+        const back = gap + 1.0 + r * STEP_DEPTH;
+        const lift = 2.0 + r * STEP_RISE;
+
+        // the step itself
+        const step = new THREE.Mesh(
+          new THREE.BoxGeometry(Math.abs(alongX) * len + Math.abs(dirX) * STEP_DEPTH,
+                                STEP_RISE,
+                                Math.abs(alongZ) * len + Math.abs(dirZ) * STEP_DEPTH),
+          r % 2 ? concrete : concreteDark);
+        step.position.set(cx + dirX * back, lift - STEP_RISE / 2, cz + dirZ * back);
+        g3.scene.add(step);
+
+        // and the row of people standing on it
+        for(let i = 0; i < perRow; i++){
+          const t = (i / (perRow - 1) - 0.5) * len * 0.94;
           const g = new THREE.Group();
-          const col = new THREE.Color(CROWD_COLORS[(i * 7 + r * 3) % CROWD_COLORS.length]);
+          const col = new THREE.Color(CROWD_COLORS[(i * 5 + r * 3) % CROWD_COLORS.length]);
           const body = new THREE.Mesh(geoBody, new THREE.MeshLambertMaterial({ color: col }));
-          body.position.y = 0.6;
+          body.position.y = 0.52;
           g.add(body);
-          const head = new THREE.Mesh(geoHead, new THREE.MeshLambertMaterial({ color: 0xd8a87a }));
-          head.position.y = 1.5;
+          const head = new THREE.Mesh(geoHead,
+            new THREE.MeshLambertMaterial({ color: (i + r) % 4 ? 0xd8a87a : 0x6b4a33 }));
+          head.position.y = 1.28;
           g.add(head);
-          g.position.set(cx + dirZ * t + dirX * back, lift, cz + dirX * t + dirZ * back);
+          g.position.set(cx + alongX * t + dirX * (back - 0.4), lift,
+                         cz + alongZ * t + dirZ * (back - 0.4));
+          g.rotation.y = Math.atan2(-dirX, -dirZ);
           g3.scene.add(g);
           people.push({ g, base: lift, phase: Math.random() * 6.28,
-                        speed: 0.7 + Math.random() * 0.8 });
+                        speed: 0.6 + Math.random() * 0.9 });
         }
       }
-    }
-    // the two long sides, then behind each goal
-    stand(0,  halfH3, 0,  1, W * S3 * 0.96, 26);
-    stand(0, -halfH3, 0, -1, W * S3 * 0.96, 26);
-    stand( halfW3, 0, 1, 0, H * S3 * 0.9, 14);
-    stand(-halfW3, 0, -1, 0, H * S3 * 0.9, 14);
 
-    // a terrace slab under them so they are not floating
-    [[0, halfH3 + 6, W * S3 * 1.1, 12], [0, -halfH3 - 6, W * S3 * 1.1, 12],
-     [halfW3 + 6, 0, 12, H * S3 * 1.05], [-halfW3 - 6, 0, 12, H * S3 * 1.05]
-    ].forEach(function(s){
-      const slab = new THREE.Mesh(
-        new THREE.BoxGeometry(s[2], 7, s[3]),
-        new THREE.MeshLambertMaterial({ color: 0x24303a })
-      );
-      slab.position.set(s[0], 1.2, s[1]);
-      g3.scene.add(slab);
-    });
+      // rail along the front and a roof over the back
+      const rail = new THREE.Mesh(
+        new THREE.BoxGeometry(Math.abs(alongX) * len + 0.3, 0.16, Math.abs(alongZ) * len + 0.3),
+        railMat);
+      rail.position.set(cx + dirX * (gap - 0.5), 2.5, cz + dirZ * (gap - 0.5));
+      g3.scene.add(rail);
+
+      const roofBack = gap + STAND_ROWS * STEP_DEPTH;
+      const roof = new THREE.Mesh(
+        new THREE.BoxGeometry(Math.abs(alongX) * len + Math.abs(dirX) * (roofBack - gap),
+                              0.5,
+                              Math.abs(alongZ) * len + Math.abs(dirZ) * (roofBack - gap)),
+        roofMat);
+      roof.position.set(cx + dirX * (gap + (roofBack - gap) / 2), 2.0 + STAND_ROWS * STEP_RISE + 3.2,
+                        cz + dirZ * (gap + (roofBack - gap) / 2));
+      g3.scene.add(roof);
+
+      // pillars holding the roof up
+      for(let i = 0; i < 5; i++){
+        const t = (i / 4 - 0.5) * len * 0.9;
+        const col = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.22, 0.22, 2.0 + STAND_ROWS * STEP_RISE + 3.2, 6), railMat);
+        col.position.set(cx + alongX * t + dirX * roofBack,
+                         (2.0 + STAND_ROWS * STEP_RISE + 3.2) / 2,
+                         cz + alongZ * t + dirZ * roofBack);
+        g3.scene.add(col);
+      }
+    }
+
+    stand(0,  halfH3, 0,  1, W * S3 * 1.02, 5, 30);
+    stand(0, -halfH3, 0, -1, W * S3 * 1.02, 5, 30);
+    stand( halfW3, 0, 1, 0, H * S3 * 0.98, 6, 18);
+    stand(-halfW3, 0,-1, 0, H * S3 * 0.98, 6, 18);
+
     g3.crowd = people;
   }
 
@@ -3419,10 +3610,10 @@
     const hype = crowdCheerT > 0 ? 1 : 0;
     for(const c of g3.crowd){
       const t = now * 0.001 * c.speed + c.phase;
-      const bob  = Math.sin(t) * 0.12;
-      const jump = hype ? Math.max(0, Math.sin(t * 6)) * 1.5 : 0;
+      const bob  = Math.sin(t) * 0.09;
+      const jump = hype ? Math.max(0, Math.sin(t * 6)) * 1.3 : 0;
       c.g.position.y = c.base + bob + jump;
-      c.g.rotation.y = Math.sin(t * 0.5) * 0.3;
+      c.g.rotation.z = Math.sin(t * 0.7) * 0.08;
     }
   }
 
@@ -3576,7 +3767,9 @@
     for(let i = 0; i < 8; i++){
       x.beginPath(); x.moveTo(i * 32, 0); x.lineTo(i * 32 + 16, 128); x.stroke();
     }
-    return new THREE.CanvasTexture(c);
+    const t = new THREE.CanvasTexture(c);
+    if(THREE.sRGBEncoding !== undefined) t.encoding = THREE.sRGBEncoding;
+    return t;
   }
 
   /* ---- name tags in 3D ----
@@ -3594,6 +3787,7 @@
     x.fillStyle = colour || '#ffffff';
     x.fillText(text, 128, 34);
     const tex = new THREE.CanvasTexture(c);
+    if(THREE.sRGBEncoding !== undefined) tex.encoding = THREE.sRGBEncoding;
     const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true }));
     spr.scale.set(5.2, 1.3, 1);
     return spr;
@@ -3664,11 +3858,11 @@
      them the players look pasted onto the pitch instead of standing on it. */
   function buildLighting(){
     // base fill: cool sky bounce, dark ground bounce
-    const hemi = new THREE.HemisphereLight(0x9fc8dd, 0x0d2416, 0.40);
+    const hemi = new THREE.HemisphereLight(0xa8cfe6, 0x16321f, 0.62);
     g3.scene.add(hemi);
 
     // the key light: one shadow map for the whole pitch
-    const key = new THREE.DirectionalLight(0xfff0cf, 0.75);
+    const key = new THREE.DirectionalLight(0xfff3da, 1.15);
     key.position.set(34, 74, 44);
     key.castShadow = true;
     key.shadow.mapSize.width  = 2048;
@@ -3686,7 +3880,7 @@
     g3.keyLight = key;
 
     // a soft bounce from the opposite side so shadowed faces are not flat black
-    const fill = new THREE.DirectionalLight(0xbcd8ff, 0.22);
+    const fill = new THREE.DirectionalLight(0xc3dcff, 0.38);
     fill.position.set(-40, 42, -50);
     g3.scene.add(fill);
 
@@ -3730,7 +3924,7 @@
       g3.scene.add(halo);
 
       // the pool of light it throws — no shadow map, just colour and falloff
-      const spot = new THREE.SpotLight(0xfff2d2, 0.55, 210, Math.PI / 5.2, 0.55, 1.4);
+      const spot = new THREE.SpotLight(0xfff4de, 0.85, 240, Math.PI / 4.6, 0.45, 1.2);
       spot.position.set(c[0], 35, c[1]);
       spot.target.position.set(c[0] * 0.28, 0, c[1] * 0.28);
       g3.scene.add(spot);
@@ -3789,6 +3983,79 @@
     }
   }
 
+  /* ---- shot power, above the player ----
+     The 2D view has had a charge bar under the player's feet for a while; in 3D
+     there was nothing, so you were winding up a shot blind. This is the same
+     meter as a billboard sprite: the ideal band is marked, and the fill turns
+     gold the moment you are inside it. */
+  function buildPowerBar(){
+    const c = document.createElement('canvas');
+    c.width = 200; c.height = 44;
+    const tex = new THREE.CanvasTexture(c);
+    if(THREE.sRGBEncoding !== undefined) tex.encoding = THREE.sRGBEncoding;
+    const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true,
+                                                            depthTest: false }));
+    spr.scale.set(7.2, 1.6, 1);
+    spr.visible = false;
+    g3.scene.add(spr);
+    return { canvas: c, ctx: c.getContext('2d'), tex, spr, last: -1, kind: null };
+  }
+
+  function drawPowerBar(bar, charge, isPower){
+    const x = bar.ctx, w = 200, h = 44;
+    x.clearRect(0, 0, w, h);
+    const bx = 8, by = 12, bw = w - 16, bh = 20;
+
+    x.fillStyle = 'rgba(0,0,0,0.72)';
+    x.fillRect(bx - 3, by - 3, bw + 6, bh + 6);
+
+    if(isPower){
+      x.fillStyle = 'rgba(255,255,255,0.22)';
+      x.fillRect(bx + bw * SWEET_MIN, by, bw * (SWEET_MAX - SWEET_MIN), bh);
+    }
+
+    const sweet = isPower && charge >= SWEET_MIN && charge <= SWEET_MAX;
+    if(sweet){
+      x.fillStyle = '#ffe066';
+    } else {
+      const g = x.createLinearGradient(bx, 0, bx + bw, 0);
+      g.addColorStop(0, '#9fe870');
+      g.addColorStop(1, '#ff5b3a');
+      x.fillStyle = g;
+    }
+    x.fillRect(bx, by, bw * charge, bh);
+
+    if(isPower){
+      x.strokeStyle = sweet ? '#ffe066' : 'rgba(255,255,255,0.65)';
+      x.lineWidth = 2;
+      x.strokeRect(bx + bw * SWEET_MIN, by - 2, bw * (SWEET_MAX - SWEET_MIN), bh + 4);
+    }
+    x.strokeStyle = 'rgba(0,0,0,0.8)';
+    x.lineWidth = 2;
+    x.strokeRect(bx, by, bw, bh);
+    bar.tex.needsUpdate = true;
+  }
+
+  function updatePowerBars(){
+    if(!g3.bars) return;
+    for(const team of teams){
+      const bar = g3.bars[team.isP1 ? 0 : 1];
+      const show = team.charge > 0.02;
+      bar.spr.visible = show;
+      if(!show){ bar.last = -1; continue; }
+      const p = getControlled(team);
+      const r = p.radius * S3;
+      bar.spr.position.set(wx(p.x), r * 7.4, wz(p.y));
+      const kind = team.chargeKind;
+      // only repaint when it actually changed, canvas uploads are not free
+      if(Math.abs(team.charge - bar.last) > 0.01 || kind !== bar.kind){
+        drawPowerBar(bar, team.charge, kind === 'power');
+        bar.last = team.charge;
+        bar.kind = kind;
+      }
+    }
+  }
+
   function makePlayerMesh(p){
     const group = new THREE.Group();
     const col   = new THREE.Color(p.role === 'GK' ? '#f3f5f0' : p.color);
@@ -3843,17 +4110,17 @@
     if(g3.ready || !has3d()) return;
 
     g3.renderer = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: true });
-    g3.renderer.setClearColor(0x050a12, 1);
+    g3.renderer.setClearColor(0x0d1624, 1);
     g3.renderer.shadowMap.enabled = true;
     g3.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     if(THREE.sRGBEncoding !== undefined) g3.renderer.outputEncoding = THREE.sRGBEncoding;
     if(THREE.ACESFilmicToneMapping !== undefined){
       g3.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      g3.renderer.toneMappingExposure = 1.12;
+      g3.renderer.toneMappingExposure = 1.45;
     }
 
     g3.scene = new THREE.Scene();
-    g3.scene.fog = new THREE.Fog(0x050a12, 130, 300);
+    g3.scene.fog = new THREE.Fog(0x14202f, 150, 330);
 
     g3.camera = new THREE.PerspectiveCamera(42, 16/9, 1, 500);
 
@@ -3863,6 +4130,10 @@
     if(!fieldCache) buildFieldCache();
     const tex = new THREE.CanvasTexture(fieldCache);
     tex.anisotropy = 4;
+    // A canvas is sRGB data. Without saying so it gets treated as linear and
+    // the grass comes out dark and muddy — which was most of why the lighting
+    // looked wrong.
+    if(THREE.sRGBEncoding !== undefined) tex.encoding = THREE.sRGBEncoding;
     const pitch = new THREE.Mesh(
       new THREE.PlaneGeometry(W * S3, H * S3),
       new THREE.MeshLambertMaterial({ map: tex })
@@ -3875,7 +4146,7 @@
     // a bit of ground around the touchlines so the pitch is not floating
     const surround = new THREE.Mesh(
       new THREE.PlaneGeometry(W * S3 * 2.1, H * S3 * 2.6),
-      new THREE.MeshLambertMaterial({ color: 0x102a1b })
+      new THREE.MeshLambertMaterial({ color: 0x1b3626 })
     );
     surround.rotation.x = -Math.PI / 2;
     surround.position.y = -0.15;
@@ -3929,8 +4200,9 @@
     g3.ballShadow.rotation.x = -Math.PI / 2;
     g3.scene.add(g3.ballShadow);
 
+    g3.bars = [buildPowerBar(), buildPowerBar()];
     buildFloodlights();
-    buildCrowd();
+    buildStands();
     g3.cheer = buildCheerBits();
     g3.flags = [
       buildFlag(-(W * S3) / 2 - 9, -(H * S3) / 2 - 4),
@@ -4000,6 +4272,7 @@
     const now = performance.now();
     for(const n of g3.nets3d) updateNet3d(n);
     updateCrowd(dt, now);
+    updatePowerBars();
     updateCheerBits(dt);
     if(g3.flags) for(const fl of g3.flags) updateFlag(fl, dt, now);
 

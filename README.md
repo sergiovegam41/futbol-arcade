@@ -16,6 +16,15 @@ Los jugadores son formas simples (cuerpo, cabeza y una cuña que marca hacia dó
 
 Si three.js no carga, el botón lo dice y el juego se queda en 2D: la página nunca depende del CDN para ser jugable.
 
+## Física del balón
+
+- **Postes y travesaño sólidos.** Antes el balón los atravesaba. Ahora la madera existe: rebota con un *¡Al palo!*, sacudida de pantalla y sonido.
+- **Un gol tiene que pasar por debajo del larguero.** El arco mide 220×73 px (1:3, como uno real) y un balón por encima ya no cuenta.
+- **Resistencia cuadrática.** Antes el rozamiento era un porcentaje fijo por frame, así que un cañonazo y un pase perdían la misma *fracción*. La resistencia real crece con el cuadrado de la velocidad: un tiro fuerte frena de golpe y luego rueda; un pase suave sigue trotando. La resistencia de rodadura es aparte y solo actúa en el suelo.
+- **Rebotes de verdad.** El balón bota varias veces perdiendo altura (63 → 21 → 8 → 3 → 1 px) en vez del único saltito que daba antes, y el suelo le frena algo de recorrido en cada bote.
+- **Los tiros muy fuertes se levantan** del césped, así que un cañonazo vuela bajo en vez de ir clavado al suelo.
+- **Sin teletransportes.** A 24 px por frame el balón saltaba limpiamente por encima de un poste entre un frame y el siguiente. Ahora la integración va en sub-pasos: verificado que a **40 px por frame** ningún disparo atraviesa la madera.
+
 ## Partido nocturno e iluminación
 
 La vista 3D es un partido de noche, y la luz es lo que la sostiene:
@@ -44,7 +53,7 @@ La red **no se abomba al marcar, sino cuando la repetición llega a ese instante
 
   Sobre la librería: **no uso Ammo.js**. Sus cuerpos blandos harían esto, pero son ~1.5 MB de WASM para una red, en un juego cuya única dependencia es three.js. La técnica de tela de three.js da el mismo resultado con cero peso añadido.
 - **Césped de verdad.** Franjas de corte con el brillo del rodillo, miles de briznas y zonas desgastadas donde un campo se pela: bocas de gol, puntos de penal y círculo central.
-- **Grada con público.** Cuatro tribunas de gente simple y cabezona que se balancea sola y **salta cuando hay gol**, cada uno a su ritmo para que la grada ondee.
+- **Gradas escalonadas.** Cuatro tribunas con muro frontal, barandilla, siete escalones que suben y se alejan, techo y pilares. 672 espectadores repartidos en las filas, mirando al campo, que se balancean solos y **saltan cuando hay gol**.
 - **Estrellas al gol.** Al marcar, el público lanza cosas desde las cuatro tribunas y caen sobre el campo.
 - **Bandera arcoíris con tela simulada.** Dos mástiles con banderas hechas de puntos y restricciones de distancia, ancladas al mástil y empujadas por un viento que va y viene.
 - **Balón texturizado** en 3D, con sus paneles, que rueda de verdad.
@@ -70,6 +79,7 @@ La máquina no hace trampa: no lee el estado interno ni recibe ventajas de físi
 - **Control cerrado:** mientras la llevas, el balón va pegado al pie y no se escapa solo al girar o esprintar.
 - **Arquero con criterio:** se queda en pie y achica de costado ante la mayoría de remates, y solo se estira cuando la pelota le queda realmente lejos. Sale del área a cortar balones sueltos y, si la atrapa, la reparte a un compañero.
 - **Poderes raros:** de vez en cuando cae un 🔥 **tiro de fuego** en el campo. El primero que lo toca se lo lleva para su equipo y **su siguiente tiro con `B`** sale en llamas, más fuerte y casi imparable. Solo lo gasta el tiro fuerte —pasar o rematar con `A` no lo consume— y caduca a los 15 s: el aro naranja alrededor del jugador marca cuánto queda.
+- **Barra de potencia también en 3D**, flotando sobre el jugador con la zona ideal marcada.
 - **Vibración del mando** al disparar cerca del arco y cuando te encaran para robarte el balón, más **temblor de pantalla** en los remates al área.
 - Duración configurable (2, 3 o 5 minutos), posesión en vivo, repeticiones de gol con celebración y sonido generado por Web Audio.
 
