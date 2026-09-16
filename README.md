@@ -34,7 +34,11 @@ Cada frame de juego se guarda en un búfer circular (solo posiciones). Al marcar
 ## Estadio y detalle
 
 - **Plantillas con nombre.** Cada jugador se llama algo: KK, Penélope, El Tanque, Pantufla, Don Cangrejo… Los arqueros tienen su propio bombo de nombres (Manotas, El Muro, Palomita). Se reparten sin repetir al empezar, salen sobre la cabeza y **el gol anuncia al goleador** — o al del gol en propia, que también se reconoce.
-- **Redes con física.** El fondo de cada arco es una tela simulada: una malla de puntos sujeta por muelles que se arrastran entre vecinos. El balón entra con su velocidad como impulso, así que un tirito hace ondas y un cañonazo la revienta. Se ve en las dos vistas.
+- **Redes de tela Verlet.** Cada arco lleva una red de 207 nodos simulada con la misma técnica que el ejemplo de cloth de three.js: integración Verlet, restricciones de distancia que solo tiran cuando la tela se estira (una red se afloja, no es elástica) y gravedad, así que **cuelga bajo su propio peso**. La malla es una sola lámina doblada en U, de modo que los dos laterales y el fondo son la misma tela y las esquinas quedan cosidas.
+
+  El balón es una **esfera sólida contra ella**: la empuja, la hunde y no la atraviesa nunca. Un tiro flojo la abomba 21px y un cañonazo 35px, y al acabar el rebote se congela sola para no seguir gastando cálculo.
+
+  Sobre la librería: **no uso Ammo.js**. Sus cuerpos blandos harían esto, pero son ~1.5 MB de WASM para una red, en un juego cuya única dependencia es three.js. La técnica de tela de three.js da el mismo resultado con cero peso añadido.
 - **Césped de verdad.** Franjas de corte con el brillo del rodillo, miles de briznas y zonas desgastadas donde un campo se pela: bocas de gol, puntos de penal y círculo central.
 - **Grada con público.** Cuatro tribunas de gente simple y cabezona que se balancea sola y **salta cuando hay gol**, cada uno a su ritmo para que la grada ondee.
 - **Estrellas al gol.** Al marcar, el público lanza cosas desde las cuatro tribunas y caen sobre el campo.

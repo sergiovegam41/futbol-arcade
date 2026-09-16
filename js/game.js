@@ -302,78 +302,221 @@
   }
 
   /* =========================================================
-     Goal nets
-     A little cloth so the net tells you how hard you hit it: a grid of points
-     that can only move along the goal's axis, pulled back to rest by a spring
-     and dragged around by their neighbours. The ball's speed on the way in is
-     the impulse, so a tap ripples and a screamer bulges.
+     Goal nets — Verlet cloth
+     The first version could only slide along one axis, never hung under its own
+     weight and the ball passed straight through it. This is a real cloth, the
+     same technique as three.js's own cloth example: particles integrated with
+     Verlet, held together by distance constraints, plus gravity and a sphere
+     collision against the ball.
+
+     Deliberately NOT a physics engine. Ammo.js soft bodies would do this too,
+     but it is ~1.5 MB of wasm for one net on a game that currently ships zero
+     dependencies beyond three.js itself.
+
+     The grid is one sheet wrapped in a U: columns walk in along the left side
+     net, across the back, and out along the right side, so a single cloth
+     covers all three panels and the corners stay stitched. It is simulated in
+     PITCH units in the goal's own space, so both views can read it:
+        u = depth into the goal (0 at the line)
+        v = height (0 on the grass)
+        w = across the mouth (0 at the top post)
      ========================================================= */
-  const NET_COLS = 13;    // across the goal mouth
-  const NET_ROWS = 8;     // up the goal
-  const NET_SPRING  = 52;   // pull back to rest
-  const NET_DAMP    = 3.4;  // energy bleed
-  const NET_SPREAD  = 26;   // how much neighbours drag each other
+  const GOAL_H_PX   = 73;              // goal height, in pitch units (3:1 like a real one)
+  const NET_SIDE_C  = 4;               // columns down each side panel
+  const NET_BACK_C  = 15;              // columns across the back
+  const NET_COLS    = NET_SIDE_C * 2 + NET_BACK_C;
+  const NET_ROWS    = 9;
+  const NET_GRAV    = 520;             // px/s^2, heavier than air so it hangs
+  const NET_DAMP    = 0.986;
+  const NET_ITERS   = 4;               // constraint relaxation passes
+  const NET_SLACK   = 1.06;            // nets are not taut; a little slack sags nicely
+
+  // rest position of node (c, r) in goal space
+  function netRest(c, r){
+    const v = GOAL_H_PX * (1 - r / (NET_ROWS - 1));
+    let u, w;
+    if(c < NET_SIDE_C){                                   // left side panel
+      u = GOAL_DEPTH * (c / NET_SIDE_C);
+      w = 0;
+    } else if(c < NET_SIDE_C + NET_BACK_C){               // the back
+      u = GOAL_DEPTH;
+      w = GOAL_WIDTH * ((c - NET_SIDE_C) / (NET_BACK_C - 1));
+    } else {                                              // right side panel
+      u = GOAL_DEPTH * (1 - (c - NET_SIDE_C - NET_BACK_C + 1) / NET_SIDE_C);
+      w = GOAL_WIDTH;
+    }
+    return { u, v, w };
+  }
 
   function makeNet(){
     const n = NET_COLS * NET_ROWS;
-    return { disp: new Float32Array(n), vel: new Float32Array(n), energy: 0 };
+    const net = {
+      u: new Float32Array(n), v: new Float32Array(n), w: new Float32Array(n),
+      pu: new Float32Array(n), pv: new Float32Array(n), pw: new Float32Array(n),
+      ru: new Float32Array(n), rv: new Float32Array(n), rw: new Float32Array(n),
+      pin: new Uint8Array(n),
+      restH: new Float32Array(n), restV: new Float32Array(n),
+      energy: 0
+    };
+    for(let r = 0; r < NET_ROWS; r++){
+      for(let c = 0; c < NET_COLS; c++){
+        const i = r * NET_COLS + c;
+        const p = netRest(c, r);
+        net.u[i] = net.pu[i] = net.ru[i] = p.u;
+        net.v[i] = net.pv[i] = net.rv[i] = p.v;
+        net.w[i] = net.pw[i] = net.rw[i] = p.w;
+        // pinned to the frame: the crossbar, the two posts, and the ground line
+        net.pin[i] = (r === 0 || r === NET_ROWS - 1 ||
+                      c === 0 || c === NET_COLS - 1) ? 1 : 0;
+      }
+    }
+    // rest lengths, with slack so the sheet hangs instead of being a drum skin
+    for(let r = 0; r < NET_ROWS; r++){
+      for(let c = 0; c < NET_COLS; c++){
+        const i = r * NET_COLS + c;
+        if(c + 1 < NET_COLS) net.restH[i] = dist3(net, i, i + 1) * NET_SLACK;
+        if(r + 1 < NET_ROWS) net.restV[i] = dist3(net, i, i + NET_COLS) * NET_SLACK;
+      }
+    }
+    return net;
   }
+
+  function dist3(net, a, b){
+    return Math.hypot(net.u[a] - net.u[b], net.v[a] - net.v[b], net.w[a] - net.w[b]);
+  }
+
   const nets = { left: makeNet(), right: makeNet() };
 
-  function netAt(net, c, r){
-    if(c < 0 || c >= NET_COLS || r < 0 || r >= NET_ROWS) return 0;
-    return net.disp[r * NET_COLS + c];
+  function relaxPair(net, a, b, rest){
+    if(!rest) return;
+    let du = net.u[b] - net.u[a], dv = net.v[b] - net.v[a], dw = net.w[b] - net.w[a];
+    const d = Math.hypot(du, dv, dw) || 1e-6;
+    // only pull when stretched: a net can go slack but not stretch like rubber
+    if(d <= rest) return;
+    const k = ((d - rest) / d) * 0.5;
+    du *= k; dv *= k; dw *= k;
+    const pa = net.pin[a], pb = net.pin[b];
+    if(!pa && !pb){
+      net.u[a] += du; net.v[a] += dv; net.w[a] += dw;
+      net.u[b] -= du; net.v[b] -= dv; net.w[b] -= dw;
+    } else if(!pa){
+      net.u[a] += du * 2; net.v[a] += dv * 2; net.w[a] += dw * 2;
+    } else if(!pb){
+      net.u[b] -= du * 2; net.v[b] -= dv * 2; net.w[b] -= dw * 2;
+    }
   }
 
-  // y across the mouth, z up the goal, power in ball-speed units
+  // where the ball is, in this goal's own space
+  function ballInGoalSpace(side){
+    const u = side === 'left' ? (FIELD_MARGIN - ball.x) : (ball.x - (W - FIELD_MARGIN));
+    return { u, v: Math.max(0, ball.z), w: ball.y - topGoalY };
+  }
+
+  function updateNets(dt){
+    const step = Math.min(dt, 1/40);
+    for(const side of ['left', 'right']){
+      const net = nets[side];
+      const b = ballInGoalSpace(side);
+      // the ball only matters while it is in or around the goal
+      const touching = b.u > -ball.radius * 2 && b.u < GOAL_DEPTH + 40 &&
+                       b.w > -40 && b.w < GOAL_WIDTH + 40 && b.v < GOAL_H_PX + 30;
+      if(net.energy <= 0 && !touching) continue;
+
+      const g = NET_GRAV * step * step;
+      for(let i = 0; i < net.u.length; i++){
+        if(net.pin[i]) continue;
+        const nu = net.u[i] + (net.u[i] - net.pu[i]) * NET_DAMP;
+        const nv = net.v[i] + (net.v[i] - net.pv[i]) * NET_DAMP - g;
+        const nw = net.w[i] + (net.w[i] - net.pw[i]) * NET_DAMP;
+        net.pu[i] = net.u[i]; net.pv[i] = net.v[i]; net.pw[i] = net.w[i];
+        net.u[i] = nu; net.v[i] = nv; net.w[i] = nw;
+      }
+
+      for(let it = 0; it < NET_ITERS; it++){
+        for(let r = 0; r < NET_ROWS; r++){
+          for(let c = 0; c < NET_COLS; c++){
+            const i = r * NET_COLS + c;
+            if(c + 1 < NET_COLS) relaxPair(net, i, i + 1, net.restH[i]);
+            if(r + 1 < NET_ROWS) relaxPair(net, i, i + NET_COLS, net.restV[i]);
+          }
+        }
+        // the ball is a hard sphere: push every node out of it
+        if(touching){
+          const rad = ball.radius + 2;
+          for(let i = 0; i < net.u.length; i++){
+            if(net.pin[i]) continue;
+            const du = net.u[i] - b.u, dv = net.v[i] - b.v, dw = net.w[i] - b.w;
+            const d = Math.hypot(du, dv, dw);
+            if(d < rad && d > 1e-4){
+              const k = (rad - d) / d;
+              net.u[i] += du * k; net.v[i] += dv * k; net.w[i] += dw * k;
+            }
+          }
+        }
+        // and it can never be pushed back out through the goal line
+        for(let i = 0; i < net.u.length; i++){
+          if(!net.pin[i] && net.u[i] < 0) net.u[i] = 0;
+        }
+      }
+
+      // Per-node, because the threshold has to mean the same thing whatever the
+      // grid size. Below this the cloth is visually still, so we stop paying for
+      // it and freeze the velocity to kill the last of the drift.
+      let moving = 0;
+      for(let i = 0; i < net.u.length; i++){
+        moving += Math.abs(net.u[i] - net.pu[i]) + Math.abs(net.v[i] - net.pv[i]) +
+                  Math.abs(net.w[i] - net.pw[i]);
+      }
+      if(!touching && moving / net.u.length < 0.02){
+        for(let i = 0; i < net.u.length; i++){
+          net.pu[i] = net.u[i]; net.pv[i] = net.v[i]; net.pw[i] = net.w[i];
+        }
+        net.energy = 0;
+      } else {
+        net.energy = 1;
+      }
+    }
+  }
+
+  // an impulse straight into the cloth, used the moment a goal is given
   function netImpulse(side, y, z, power){
     const net = nets[side];
     if(!net) return;
-    const fy = (y - topGoalY) / GOAL_WIDTH;                  // 0..1 across
-    const fz = Math.max(0, Math.min(1, z / 70));             // 0..1 up
-    const cc = Math.round(fy * (NET_COLS - 1));
-    const rr = Math.round((1 - fz) * (NET_ROWS - 1));
-    const hit = Math.max(0.6, Math.min(power / 12, 2.4));
-    for(let r = 0; r < NET_ROWS; r++){
-      for(let c = 0; c < NET_COLS; c++){
-        const d = Math.hypot(c - cc, (r - rr) * 1.2);
-        const falloff = Math.exp(-(d * d) / 7);
-        net.vel[r * NET_COLS + c] += hit * 34 * falloff;
-      }
+    const tw = y - topGoalY, tv = Math.max(0, z);
+    const hit = Math.max(0.5, Math.min(power / 11, 2.6));
+    for(let i = 0; i < net.u.length; i++){
+      if(net.pin[i]) continue;
+      const d = Math.hypot(net.w[i] - tw, net.v[i] - tv);
+      const falloff = Math.exp(-(d * d) / 5200);
+      net.pu[i] -= hit * 9 * falloff;        // Verlet: move the PREVIOUS point back
     }
     net.energy = 1;
   }
 
-  function updateNets(dt){
-    const step = Math.min(dt, 1/30);
+  function resetNets(){
     for(const side of ['left', 'right']){
       const net = nets[side];
-      if(net.energy <= 0) continue;
-      let moving = 0;
-      for(let r = 0; r < NET_ROWS; r++){
-        for(let c = 0; c < NET_COLS; c++){
-          const i = r * NET_COLS + c;
-          const edge = (c === 0 || c === NET_COLS - 1 || r === 0 || r === NET_ROWS - 1);
-          if(edge){ net.disp[i] = 0; net.vel[i] = 0; continue; }
-          const around = netAt(net, c-1, r) + netAt(net, c+1, r) +
-                         netAt(net, c, r-1) + netAt(net, c, r+1);
-          const acc = -NET_SPRING * net.disp[i] + NET_SPREAD * (around - 4 * net.disp[i]);
-          net.vel[i] += acc * step;
-          net.vel[i] -= net.vel[i] * NET_DAMP * step;
-          net.disp[i] += net.vel[i] * step;
-          moving += Math.abs(net.disp[i]) + Math.abs(net.vel[i]);
-        }
+      for(let i = 0; i < net.u.length; i++){
+        net.u[i] = net.pu[i] = net.ru[i];
+        net.v[i] = net.pv[i] = net.rv[i];
+        net.w[i] = net.pw[i] = net.rw[i];
       }
-      if(moving < 0.05){
-        net.disp.fill(0); net.vel.fill(0); net.energy = 0;
-      }
+      net.energy = 0;
     }
   }
 
-  function resetNets(){
-    for(const side of ['left', 'right']){
-      nets[side].disp.fill(0); nets[side].vel.fill(0); nets[side].energy = 0;
-    }
+  // how far the back of the net is pushed out at a given point across the mouth,
+  // in pitch px — this is all the top-down view needs
+  function netBulgeAt(side, yPitch){
+    const net = nets[side];
+    const f = Math.max(0, Math.min(1, (yPitch - topGoalY) / GOAL_WIDTH));
+    const cf = NET_SIDE_C + f * (NET_BACK_C - 1);
+    const c0 = Math.floor(cf), c1 = Math.min(NET_SIDE_C + NET_BACK_C - 1, c0 + 1);
+    const t = cf - c0;
+    const row = Math.floor(NET_ROWS / 2);
+    const i0 = row * NET_COLS + c0, i1 = row * NET_COLS + c1;
+    const d0 = net.u[i0] - net.ru[i0], d1 = net.u[i1] - net.ru[i1];
+    return d0 + (d1 - d0) * t;
   }
 
   /* =========================================================
@@ -2569,17 +2712,8 @@
       // ---- net mesh, bulging with whatever just hit it ----
       // Seen from above only the sideways give of the cloth is visible, so the
       // back line of the net is drawn displaced by the simulation.
-      const net = nets[side];
-      const midRow = Math.floor(NET_ROWS / 2);
-      const bulgeAt = (yy) => {
-        const f = Math.max(0, Math.min(1, (yy - topGoalY) / GOAL_WIDTH));
-        const cf = f * (NET_COLS - 1);
-        const c0 = Math.floor(cf), c1 = Math.min(NET_COLS - 1, c0 + 1);
-        const t = cf - c0;
-        const d0 = net.disp[midRow * NET_COLS + c0];
-        const d1 = net.disp[midRow * NET_COLS + c1];
-        return (d0 + (d1 - d0) * t) * (side === 'left' ? -1 : 1);
-      };
+      // the cloth reports how far the back panel has been pushed out
+      const bulgeAt = (yy) => netBulgeAt(side, yy) * (side === 'left' ? -1 : 1);
 
       ctx.save();
       ctx.beginPath();
@@ -3196,7 +3330,7 @@
 
   function has3d(){ return typeof THREE !== 'undefined' && !!canvas3d; }
 
-  const GOAL_H3 = 2.6;                       // goal height in world units
+  const GOAL_H3 = GOAL_H_PX * S3;            // goal height in world units (3:1, like a real goal)
   function wx(x){ return (x - W/2) * S3; }   // pitch x  -> world x
   function wz(y){ return (y - H/2) * S3; }   // pitch y  -> world z
 
@@ -3377,29 +3511,25 @@
     const net = nets[n.side];
     const p = n.pos;
     let k = 0;
+    // goal space (u = depth in, v = height, w = across) -> world
     const node = (c, r) => {
-      const z = -n.halfW3 + (c / (NET_COLS - 1)) * n.halfW3 * 2;
-      const y = n.hgt - (r / (NET_ROWS - 1)) * n.hgt;
-      const bulge = net.disp[r * NET_COLS + c] * S3;
-      const x = n.gx - n.dir * (GOAL_DEPTH * S3) - n.dir * bulge;
+      const i = r * NET_COLS + c;
+      const x = n.gx - n.dir * net.u[i] * S3;
+      const y = net.v[i] * S3;
+      const z = (net.w[i] - GOAL_WIDTH / 2) * S3;
       return [x, y, z];
     };
-    for(let r = 0; r < NET_ROWS; r++){
-      for(let c = 0; c < NET_COLS - 1; c++){
-        const a = node(c, r), b = node(c + 1, r);
-        p[k++]=a[0]; p[k++]=a[1]; p[k++]=a[2];
-        p[k++]=b[0]; p[k++]=b[1]; p[k++]=b[2];
-      }
-    }
-    for(let c = 0; c < NET_COLS; c++){
-      for(let r = 0; r < NET_ROWS - 1; r++){
-        const a = node(c, r), b = node(c, r + 1);
-        p[k++]=a[0]; p[k++]=a[1]; p[k++]=a[2];
-        p[k++]=b[0]; p[k++]=b[1]; p[k++]=b[2];
-      }
-    }
+    const push = (a, b) => {
+      p[k++]=a[0]; p[k++]=a[1]; p[k++]=a[2];
+      p[k++]=b[0]; p[k++]=b[1]; p[k++]=b[2];
+    };
+    for(let r = 0; r < NET_ROWS; r++)
+      for(let c = 0; c < NET_COLS - 1; c++) push(node(c, r), node(c + 1, r));
+    for(let c = 0; c < NET_COLS; c++)
+      for(let r = 0; r < NET_ROWS - 1; r++) push(node(c, r), node(c, r + 1));
     n.geo.attributes.position.needsUpdate = true;
   }
+
 
   /* ---- a proper football skin for the 3D ball ---- */
   function ballTexture(){
