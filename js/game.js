@@ -41,7 +41,9 @@
       stageEl.style.width  = displayW + 'px';
       stageEl.style.height = displayH + 'px';
     }
-    const dpr = window.devicePixelRatio || 1;
+    // capped like the WebGL side already was: a 4K laptop at dpr 3 was giving
+    // the overlay canvas a 5760x3240 backing store, composited every frame
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
     canvas.style.width = displayW + 'px';
     canvas.style.height = displayH + 'px';
     canvas.width = Math.round(displayW * dpr);
@@ -52,8 +54,16 @@
     if(typeof resize3d === 'function') resize3d();
   }
   let scaleX = 1, scaleY = 1;
-  window.addEventListener('resize', () => { resizeCanvas(); if(typeof resize3d === 'function') resize3d(); });
-  window.addEventListener('orientationchange', resizeCanvas);
+  // one layout per frame at most: dragging a window edge fires dozens of
+  // resize events a second, and each one used to rebuild the grass cache
+  let resizeRaf = 0;
+  function queueResize(){
+    if(resizeRaf) return;
+    resizeRaf = requestAnimationFrame(() => { resizeRaf = 0; resizeCanvas(); });
+  }
+  window.addEventListener('resize', queueResize);
+  window.addEventListener('orientationchange', queueResize);
+  if(document.addEventListener) document.addEventListener('fullscreenchange', queueResize);
   resizeCanvas();
   setTimeout(resizeCanvas, 0);
 
@@ -70,7 +80,15 @@
   const finalScoreEl= document.getElementById('final-score');
   const soundBtn    = document.getElementById('sound-btn');
   const pauseBtn    = document.getElementById('pause-btn');
+  const fsBtn       = document.getElementById('fs-btn');
   const lenSeg      = document.getElementById('len-seg');
+  const pauseMenu   = document.getElementById('pause-menu');
+  const pauseViewBtn  = document.getElementById('pause-view');
+  const pauseSoundBtn = document.getElementById('pause-sound');
+  const settingsBtn = document.getElementById('settings-btn');
+  const mobileNote  = document.getElementById('mobile-note');
+  // honour the OS "reduce motion" preference: no shake, no confetti
+  const REDUCE_MOTION = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
   /* =========================================================
      Pitch geometry
@@ -98,6 +116,12 @@
   let celebration  = null;       // {text, color, t}
   let shake        = 0;
   let score1 = 0, score2 = 0;
+  // match statistics for the result card; index 0 = team1, 1 = team2
+  const stats = { shots:[0,0], onTarget:[0,0], saves:[0,0], steals:[0,0], posts:[0,0], goals:[] };
+  function resetStats(){
+    for(const k of ['shots','onTarget','saves','steals','posts']){ stats[k][0] = 0; stats[k][1] = 0; }
+    stats.goals.length = 0;
+  }
   let possession = [0, 0];       // accumulated seconds of possession
   let lastTouchTeam = null;
   let ballOwner     = null;   // the player who currently owns the ball
@@ -113,8 +137,10 @@
     if(capturedKeys.includes(e.code)) e.preventDefault();
     if(e.repeat){ keys[e.code] = true; return; }
     keys[e.code] = true;
-    if(e.code === 'KeyN'){ toggleMute(); return; }
-    // with the menu up the keys drive the menu and nothing else
+    if(e.code === 'KeyN'){ ensureAudio(); toggleMute(); if(paused) refreshPauseLabels(); return; }
+    // the pause keys work with the pause menu up (they close it)
+    if(running && (e.code === 'KeyP' || e.code === 'Escape')){ togglePause(); return; }
+    // with a menu up the keys drive the menu and nothing else
     if(uiOpen()){
       if(e.code === 'ArrowUp')    { uiMove(-1,  0); return; }
       if(e.code === 'ArrowDown')  { uiMove( 1,  0); return; }
@@ -123,6 +149,7 @@
       if(e.code === 'Enter' || e.code === 'Space'){ uiActivate(); return; }
       return;
     }
+    if(skipEnding()) return;
     if(intro.active){ skipIntro(); sfx.whistle(); return; }
     if(replay.active || goalAction > 0){ if(skipCelebration()) return; }
     if(e.code === 'KeyQ') manualSwitch(team1);
@@ -138,48 +165,142 @@
   /* =========================================================
      Audio (tiny WebAudio blips, no assets)
      ========================================================= */
+  // Everything goes through one master gain, split into an effects bus and a
+  // crowd bus. That is what makes mute a fade instead of a cut, lets the crowd
+  // duck under a whistle, and gives the whole mix one knob.
   let audioCtx = null, soundOn = true;
+  let master = null, sfxBus = null, ambBus = null, noiseBuf = null;
   function ensureAudio(){
     if(!audioCtx){
       const AC = window.AudioContext || window.webkitAudioContext;
-      if(AC) audioCtx = new AC();
+      if(!AC) return;
+      audioCtx = new AC();
+      master = audioCtx.createGain(); master.gain.value = soundOn ? 1 : 0;
+      master.connect(audioCtx.destination);
+      sfxBus = audioCtx.createGain(); sfxBus.gain.value = 0.9; sfxBus.connect(master);
+      ambBus = audioCtx.createGain(); ambBus.gain.value = 1.0; ambBus.connect(master);
+      noiseBuf = makeNoiseBuffer(audioCtx, 4);   // shared by every noise voice
     }
-    if(audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    if(audioCtx.state === 'suspended') audioCtx.resume();
   }
-  function blip(freq, dur, type, gain){
+  // browsers only let audio start from a gesture; any of these counts
+  ['pointerdown', 'keydown', 'gamepadconnected'].forEach(ev =>
+    window.addEventListener(ev, ensureAudio, { passive: true }));
+
+  // A tone. The 6 ms attack is the whole difference between a note and a
+  // click: a gain stepping straight to 0.06 on a square wave IS a click, and
+  // every kick used to have one. `when` is an offset on the AUDIO clock, so
+  // arpeggios never drift the way setTimeout ones did under load.
+  function blip(freq, dur, type, gain, when, bus){
     if(!soundOn || !audioCtx) return;
+    const t = audioCtx.currentTime + (when || 0);
     const osc = audioCtx.createOscillator();
     const g   = audioCtx.createGain();
     osc.type = type || 'sine';
-    osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
-    g.gain.setValueAtTime(gain || 0.08, audioCtx.currentTime);
-    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + dur);
-    osc.connect(g).connect(audioCtx.destination);
-    osc.start();
-    osc.stop(audioCtx.currentTime + dur);
+    osc.frequency.setValueAtTime(freq, t);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(gain || 0.08, t + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    osc.connect(g).connect(bus || sfxBus);
+    osc.start(t);
+    osc.stop(t + dur + 0.02);
   }
+  // A filtered burst of noise: the transient layer every impact was missing.
+  // A boot on a ball is not a tone, it is a thud with a bit of scuff on it.
+  function noise(dur, freq, q, gain, when, type, bus){
+    if(!soundOn || !audioCtx || !noiseBuf) return;
+    const t = audioCtx.currentTime + (when || 0);
+    const s = audioCtx.createBufferSource();
+    s.buffer = noiseBuf; s.loop = true;
+    const f = audioCtx.createBiquadFilter();
+    f.type = type || 'bandpass'; f.frequency.value = freq; f.Q.value = q || 1;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(gain, t + 0.004);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    s.connect(f).connect(g).connect(bus || sfxBus);
+    s.start(t, Math.random() * 3);
+    s.stop(t + dur + 0.02);
+  }
+  const jit = (k) => 1 - k + Math.random() * 2 * k;   // ±k pitch jitter: no two alike
+
   const sfx = {
-    kick(power){ blip(180 + power * 220, 0.10, 'square', 0.06); },
-    pass(){ blip(420, 0.07, 'triangle', 0.05); },
-    wall(){ blip(120, 0.06, 'sine', 0.04); },
-    save(){ blip(300, 0.12, 'sawtooth', 0.05); },
-    goal(){
-      [0, 120, 240, 420].forEach((ms, i) => {
-        setTimeout(() => blip([523, 659, 784, 1047][i], 0.28, 'square', 0.07), ms);
-      });
+    // boot transient + body thump, both scaled by power and slightly detuned
+    kick(power){
+      const p = clamp01((power || 8) / 24), j = jit(0.06);
+      noise(0.045, (900 + p * 1400) * j, 1.2, 0.05 + p * 0.05);
+      blip((70 + p * 55) * j, 0.11 + p * 0.05, 'sine', 0.07 + p * 0.06);
     },
-    whistle(){
-      [0, 150, 300].forEach(ms => setTimeout(() => blip(1400, 0.16, 'sine', 0.05), ms));
-    }
+    pass(){
+      noise(0.03, 1100 * jit(0.05), 1.4, 0.035);
+      blip(300 * jit(0.03), 0.06, 'triangle', 0.04);
+    },
+    wall(){ blip(120 * jit(0.04), 0.06, 'sine', 0.04); noise(0.03, 700, 1, 0.03); },
+    // the woodwork: two ringing partials, a scuff, and the crowd's groan
+    post(){
+      blip(1180, 0.5, 'sine', 0.12); blip(1790, 0.35, 'sine', 0.05);
+      noise(0.04, 3000, 2, 0.05);
+      crowdOoh();
+    },
+    slide(){ noise(0.34, 520, 0.8, 0.075, 0, 'lowpass'); },   // grass scrape
+    save(){ noise(0.07, 1500, 0.9, 0.08); blip(240, 0.10, 'sawtooth', 0.04); },
+    goal(){
+      [0, 0.12, 0.24, 0.42].forEach((d, i) => blip([523, 659, 784, 1047][i], 0.28, 'square', 0.07, d));
+      duckCrowd(0.35, 0.6);
+    },
+    // three short peeps for a kick-off, one long one for the end
+    whistle(kind){
+      const n = kind === 'full' ? 1 : 3, len = kind === 'full' ? 0.9 : 0.16;
+      for(let i = 0; i < n; i++){
+        blip(1400, len, 'sine', 0.05, i * 0.15);
+        blip(2090, len, 'sine', 0.02, i * 0.15);
+      }
+      duckCrowd(0.4, n * 0.15 + len);
+    },
+    // picking up a power used to play the GOAL fanfare — an outright mis-cue
+    pickup(){ [0, 0.05, 0.10].forEach((d, i) => blip([784, 1047, 1319][i], 0.12, 'triangle', 0.05, d)); },
+    sweetIn(){  blip(880, 0.05, 'square', 0.028); },
+    sweetOut(){ blip(300, 0.06, 'square', 0.022); },
+    uiMove(){ blip(660, 0.035, 'square', 0.022); },
+    uiOk(){   blip(520, 0.05, 'square', 0.03); blip(780, 0.07, 'square', 0.028, 0.045); }
   };
+
+  // pull the crowd down for a moment so a whistle or a fanfare sits on top
+  function duckCrowd(amount, secs){
+    if(!audioCtx || !ambBus) return;
+    const t = audioCtx.currentTime;
+    ambBus.gain.cancelScheduledValues(t);
+    ambBus.gain.setTargetAtTime(amount, t, 0.03);
+    ambBus.gain.setTargetAtTime(1, t + secs, 0.25);
+  }
+  // the near-miss groan: a band swept up and back down over half a second
+  function crowdOoh(){
+    if(!soundOn || !audioCtx || !noiseBuf) return;
+    const t = audioCtx.currentTime;
+    const s = audioCtx.createBufferSource(); s.buffer = noiseBuf; s.loop = true;
+    const f = audioCtx.createBiquadFilter(); f.type = 'bandpass'; f.Q.value = 1.4;
+    f.frequency.setValueAtTime(500, t);
+    f.frequency.exponentialRampToValueAtTime(1100, t + 0.22);
+    f.frequency.exponentialRampToValueAtTime(600, t + 0.6);
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.16, t + 0.18);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.65);
+    s.connect(f).connect(g).connect(ambBus);
+    s.start(t, Math.random() * 3); s.stop(t + 0.7);
+  }
+
   function toggleMute(){
     soundOn = !soundOn;
+    if(master) master.gain.setTargetAtTime(soundOn ? 1 : 0, audioCtx.currentTime, 0.04);
     soundBtn.textContent = soundOn ? '🔊' : '🔇';
     soundBtn.title = soundOn ? 'Silenciar (N o Back)' : 'Activar sonido (N o Back)';
+    soundBtn.setAttribute('aria-label', soundBtn.title);
     flashStatus(soundOn ? 'Sonido activado' : 'Silencio');
+    saveSettings();
   }
   soundBtn.title = 'Silenciar (N o Back)';
-  soundBtn.addEventListener('click', toggleMute);
+  soundBtn.addEventListener('click', () => { ensureAudio(); toggleMute(); });
 
   /* =========================================================
      Crowd ambience
@@ -211,7 +332,7 @@
 
   function startAmbience(){
     if(amb.on || !audioCtx) return;
-    const buf = makeNoiseBuffer(audioCtx, 4);
+    const buf = noiseBuf;
 
     // layer 1: the constant murmur
     const src = audioCtx.createBufferSource();
@@ -220,7 +341,7 @@
     lp.type = 'lowpass'; lp.frequency.value = 520; lp.Q.value = 0.6;
     const g1 = audioCtx.createGain();
     g1.gain.value = 0;
-    src.connect(lp).connect(g1).connect(audioCtx.destination);
+    src.connect(lp).connect(g1).connect(ambBus);
     src.start();
 
     // layer 2: the excited one, brighter and only audible when something is on
@@ -230,7 +351,7 @@
     bp.type = 'bandpass'; bp.frequency.value = 900; bp.Q.value = 0.9;
     const g2 = audioCtx.createGain();
     g2.gain.value = 0;
-    src2.connect(bp).connect(g2).connect(audioCtx.destination);
+    src2.connect(bp).connect(g2).connect(ambBus);
     src2.start();
 
     amb.on = true;
@@ -287,7 +408,7 @@
     if(!soundOn || !audioCtx) return;
     const t = audioCtx.currentTime;
     const src = audioCtx.createBufferSource();
-    src.buffer = makeNoiseBuffer(audioCtx, 2.6);
+    src.buffer = noiseBuf;   // no 125k-sample synth on the goal frame
     const bp = audioCtx.createBiquadFilter();
     bp.type = 'bandpass'; bp.frequency.setValueAtTime(700, t);
     bp.frequency.exponentialRampToValueAtTime(1500, t + 0.35);
@@ -296,8 +417,8 @@
     g.gain.setValueAtTime(0.0001, t);
     g.gain.exponentialRampToValueAtTime(0.30, t + 0.22);
     g.gain.exponentialRampToValueAtTime(0.0001, t + 2.4);
-    src.connect(bp).connect(g).connect(audioCtx.destination);
-    src.start(t);
+    src.connect(bp).connect(g).connect(ambBus);
+    src.start(t, Math.random() * 1.2);
     src.stop(t + 2.6);
   }
 
@@ -401,8 +522,10 @@
     });
   }
 
+  let rosterCache = null;   // the roster never changes after startup
   function allPlayers(){
-    return [team1.gk].concat(team1.outfield, [team2.gk], team2.outfield);
+    if(!rosterCache) rosterCache = [team1.gk].concat(team1.outfield, [team2.gk], team2.outfield);
+    return rosterCache;
   }
 
   const ball = {
@@ -410,7 +533,7 @@
     friction:0.986, spin:0, trail:[],
     // a real strike, as opposed to a dribble touch: this is what the keeper reads
     shotTimer:0, shotSide:null, shotId:0, heldBy:null, shotPower:0, shotSweet:false, shotFire:false, shotDist:0,
-    releaseGuard:0, releaseSide:null, curve:0,
+    releaseGuard:0, releaseSide:null, curve:0, ownerLock:0, stealGuard:0,
     z:0, vz:0, loftTeam:null
   };
 
@@ -643,6 +766,7 @@
       }
       net.energy = 0;
     }
+    if(g3.nets3d) for(const n of g3.nets3d) n.uploaded = false;
   }
 
   // how far the back of the net is pushed out at a given point across the mouth,
@@ -730,7 +854,7 @@
             team.powerup = pu.kind;
             team.powerupTimer = PU_HOLD_TIME;
             powerups.splice(i, 1);
-            sfx.goal();
+            sfx.pickup();
             shake = Math.max(shake, 8);
             spawnParticles(pu.x, pu.y, 26, {
               speed: 4, life: 0.7, size: 4, gravity: 0.03,
@@ -854,9 +978,32 @@
       t.gk.state = "idle"; t.gk.stateTimer = 0; t.gk.readShot = -1;
       t.gk.reactTimer = 0; t.gk.reactShot = -1; t.gk.beatenTimer = 0;
     }
-    lastTouchTeam = towardSide || null;
+    ball.ownerLock = 0; ball.stealGuard = 0;
+    lastTouchTeam = null;
     ballOwner = null;
+
+    // A restart belongs to somebody. After a goal the conceding side kicks off:
+    // their forward stands on the ball with the controls, and the other side is
+    // kept off it for the first moments of play. Without this, every restart
+    // was a perfectly symmetric scrum — both forwards 60px from the ball, and
+    // whoever mashed the stick first won it (against the CPU: deterministic).
+    if(towardSide){
+      const idx = towardSide.outfield.findIndex(p => p.role === 'FWD');
+      if(idx >= 0){
+        const taker = towardSide.outfield[idx];
+        const back  = towardSide.side === 'left' ? -1 : 1;
+        taker.x = W/2 + back * 24; taker.y = H/2;
+        taker.facing.x = -back; taker.facing.y = 0;
+        towardSide.controlledIndex = idx;
+        ballOwner = taker;
+        lastTouchTeam = towardSide;
+        ball.releaseGuard = KICKOFF_GUARD;     // opponents cannot poach the restart
+        ball.releaseSide  = towardSide.side;
+      }
+    }
   }
+  const KICKOFF_GUARD = 0.7;   // s after the whistle the restart is protected
+  let restartTeam = null;      // who kicks off next (the side that just conceded)
 
   function goalCheck(){
     // Not while one is already being resolved. Without the replay half of
@@ -899,7 +1046,10 @@
       speed: Math.hypot(ball.vx, ball.vy),
       hitY: ball.y, hitZ: ball.z
     };
+    stats.goals.push({ team, who, own, minute: Math.ceil((matchLength - matchTime) / 60) });
+    if(!own) stats.onTarget[team.isP1 ? 0 : 1]++;
     goalAction = GOAL_ACTION;
+    restartTeam = team.isP1 ? team2 : team1;   // the side that conceded kicks off
 
     // the crowd and the shake go off NOW — they are reacting to the ball
     // crossing, not to the replay
@@ -908,7 +1058,7 @@
     crowdRoar();
     crowdCheer(3.2);
     flashStatus(own ? ('¡Gol en propia de ' + who + '!')
-                    : ('¡GOL ' + (who ? 'de ' + who : 'del equipo ' + team.name) + '!'));
+                    : ('¡GOL ' + (who ? 'de ' + who : 'del equipo ' + team.name) + '!'), 'goal');
   }
 
   // called once the ball has finished its business inside the net
@@ -936,11 +1086,11 @@
       // the net is punched when the REPLAY reaches the moment of impact, not
       // when the goal is given — otherwise it has finished bouncing by then
       resetNets();
-      resetPositions();   // out of the net before anything else looks at it
+      resetPositions(restartTeam);   // out of the net before anything else looks at it
       kickoffTimer = 0;
     } else {
       kickoffTimer = 1.8;
-      resetPositions();
+      resetPositions(restartTeam);
     }
   }
 
@@ -957,12 +1107,24 @@
   }
 
   let statusTimeout = null;
-  function flashStatus(msg){
+  // Fifteen different things write to this one line, and the last one used to
+  // win: a routine "saque del arquero" would wipe "¡GOL de Tuti!" half a second
+  // after it appeared. Now a message carries a priority and a lesser one
+  // cannot replace a greater one while it is showing.
+  const STATUS_PRIO = { info: 0, play: 1, goal: 2 };
+  let statusPrio = -1;
+  function flashStatus(msg, kind){
+    const p = STATUS_PRIO[kind || 'info'];
+    if(p < statusPrio) return;
+    statusPrio = p;
     statusEl.textContent = msg;
+    statusEl.classList.toggle('goal', p === STATUS_PRIO.goal);
     clearTimeout(statusTimeout);
     statusTimeout = setTimeout(() => {
+      statusPrio = -1;
+      statusEl.classList.remove('goal');
       statusEl.textContent = running ? (paused ? 'Pausa' : '') : '¡A jugar!';
-    }, 2000);
+    }, p === STATUS_PRIO.goal ? 3200 : 2000);
   }
 
   function updatePossessionHud(){
@@ -976,9 +1138,15 @@
   /* =========================================================
      Gamepads
      ========================================================= */
+  // navigator.getGamepads() copies every pad's state on each call; it was
+  // being called three to five times a frame. One snapshot per frame instead.
+  let padSnap = null;
   function getGamepads(){
-    return navigator.getGamepads ? navigator.getGamepads() : [];
+    if(padSnap) return padSnap;
+    padSnap = navigator.getGamepads ? navigator.getGamepads() : [];
+    return padSnap;
   }
+  function dropPadSnapshot(){ padSnap = null; }
   function trimName(name){
     return name.length > 22 ? name.slice(0, 22) + '…' : name;
   }
@@ -1004,17 +1172,29 @@
       chip2.classList.remove('on');
     }
   }
-  setInterval(updatePadChips, 1000);
+  setInterval(() => { if(uiOpen()) updatePadChips(); }, 1500);
   window.addEventListener('gamepadconnected', updatePadChips);
   window.addEventListener('gamepaddisconnected', updatePadChips);
+
+  const STICK_DZ  = 0.15;   // radial deadzone
+  const STICK_MAX = 0.95;   // where the stick counts as fully pushed
+  const WALK_MIN  = 0.45;   // fraction of top speed at the deadzone edge
 
   function readPadInput(index){
     const gp = getGamepads()[index];
     if(!gp) return null;
     let dx = 0, dy = 0;
     if(gp.axes.length >= 2){
-      dx = Math.abs(gp.axes[0]) > 0.18 ? gp.axes[0] : 0;
-      dy = Math.abs(gp.axes[1]) > 0.18 ? gp.axes[1] : 0;
+      // Radial deadzone, not per-axis. Per-axis zeroed any shallow component
+      // near a cardinal, so pushing right-and-a-bit-up travelled dead flat —
+      // the "8-way / notchy stick" feel. The magnitude is rescaled from the
+      // deadzone edge to 1 and KEPT: it becomes walking speed downstream.
+      const ax = gp.axes[0], ay = gp.axes[1];
+      const m  = Math.hypot(ax, ay);
+      if(m > STICK_DZ){
+        const s = Math.min(1, (m - STICK_DZ) / (STICK_MAX - STICK_DZ)) / m;
+        dx = ax * s; dy = ay * s;
+      }
     }
     if(gp.buttons.length >= 16){
       if(gp.buttons[14] && gp.buttons[14].pressed) dx = -1;
@@ -1114,12 +1294,12 @@
      two frames.
      ========================================================= */
   const uiPrev = { any:false, up:false, down:false, left:false, right:false,
-                   ok:false, mute:false };
+                   ok:false, mute:false, start:false };
 
   function padUiState(){
     const pads = getGamepads();
     const st = { any:false, up:false, down:false, left:false, right:false,
-                 ok:false, mute:false };
+                 ok:false, mute:false, start:false };
     for(let i = 0; i < 2; i++){
       const gp = pads[i];
       if(!gp) continue;
@@ -1132,6 +1312,7 @@
       st.right = st.right || btn(15) || ax >  0.55;
       st.ok    = st.ok    || btn(0)  || btn(9);        // A or Start
       st.mute  = st.mute  || btn(8);                   // Back / Select
+      st.start = st.start || btn(9);                   // Start: pause
       // the face buttons and LB skip a cinematic; the triggers do not, because
       // you hold sprint permanently and that is not a request to skip anything
       st.any   = st.any || btn(0) || btn(1) || btn(2) || btn(3) || btn(4) || btn(9);
@@ -1142,8 +1323,26 @@
   // ---- the start overlay, driven by keys or by a pad ----
   let uiRow = 0, uiCol = 0;
 
+  // Which panel is up: the start menu, the pause menu, or nothing. Each has
+  // its own grid of buttons for the cursor to walk.
+  function uiPanel(){
+    if(overlay && !overlay.classList.contains('hidden')) return 'menu';
+    if(pauseMenu && running && paused) return 'pause';
+    return null;
+  }
   function uiRows(){
     const rows = [];
+    const panel = uiPanel();
+    if(panel === 'pause'){
+      Array.prototype.forEach.call(pauseMenu.querySelectorAll('button'), b => { if(!b.disabled) rows.push([b]); });
+      return rows;
+    }
+    if(overlay && overlay.classList.contains('result')){
+      // the result card: one row, "Revancha" and "Cambiar ajustes"
+      const r = [startBtn]; if(settingsBtn && !settingsBtn.hidden) r.push(settingsBtn);
+      rows.push(r);
+      return rows;
+    }
     for(const id of ['view-seg', 'mode-seg', 'level-seg', 'len-seg']){
       const el = document.getElementById(id);
       if(!el) continue;
@@ -1156,22 +1355,35 @@
     return rows;
   }
 
-  function uiOpen(){ return !!overlay && !overlay.classList.contains('hidden'); }
+  function uiOpen(){ return uiPanel() !== null; }
 
   function uiPaint(){
-    const all = document.querySelectorAll('#overlay button');
+    const all = document.querySelectorAll('#overlay button, #pause-menu button');
     Array.prototype.forEach.call(all, b => b.classList.remove('ui-focus'));
     if(!uiOpen()) return;
     const rows = uiRows();
     if(!rows.length) return;
     uiRow = Math.max(0, Math.min(rows.length - 1, uiRow));
     uiCol = Math.max(0, Math.min(rows[uiRow].length - 1, uiCol));
-    rows[uiRow][uiCol].classList.add('ui-focus');
+    const f = rows[uiRow][uiCol];
+    f.classList.add('ui-focus');
+    if(f.scrollIntoView) f.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    if(f.focus) f.focus({ preventScroll: true });
+  }
+
+  // put the cursor on a given button (after a mouse click, or a restored setting)
+  function uiSyncTo(btn){
+    const rows = uiRows();
+    for(let r = 0; r < rows.length; r++){
+      const c = rows[r].indexOf(btn);
+      if(c >= 0){ uiRow = r; uiCol = c; uiPaint(); return; }
+    }
   }
 
   function uiMove(dr, dc){
     const rows = uiRows();
     if(!rows.length) return;
+    sfx.uiMove();
     if(dr){
       uiRow = (uiRow + dr + rows.length) % rows.length;
       uiCol = Math.min(uiCol, rows[uiRow].length - 1);
@@ -1187,6 +1399,8 @@
     const rows = uiRows();
     if(!rows.length) return;
     const btn = rows[uiRow][uiCol];
+    if(btn && btn.disabled) return;
+    sfx.uiOk();
     if(btn) btn.click();
     uiPaint();          // picking "la máquina" adds a row, so redraw the cursor
   }
@@ -1195,18 +1409,25 @@
   function pollUiPad(){
     const st = padUiState();
 
-    if(st.mute && !uiPrev.mute) toggleMute();
+    if(st.mute && !uiPrev.mute){ ensureAudio(); toggleMute(); if(paused) refreshPauseLabels(); }
 
-    if(uiOpen()){
+    // Start: pause and unpause during a match (in the menus it is "ok")
+    const startEdge = st.start && !uiPrev.start;
+    if(startEdge && running && (paused || (!intro.active && !replay.active && goalAction <= 0))){
+      togglePause();
+    } else if(uiOpen()){
       if(st.up    && !uiPrev.up)    uiMove(-1,  0);
       if(st.down  && !uiPrev.down)  uiMove( 1,  0);
       if(st.left  && !uiPrev.left)  uiMove( 0, -1);
       if(st.right && !uiPrev.right) uiMove( 0,  1);
       if(st.ok    && !uiPrev.ok)    uiActivate();
-    } else if(st.any && !uiPrev.any && running && !paused){
-      if(intro.active){ skipIntro(); sfx.whistle(); }
+    } else if(st.any && !uiPrev.any){
+      if(skipEnding()){ /* the final confetti */ }
+      else if(!running || paused){ /* nothing to skip */ }
+      else if(intro.active){ skipIntro(); sfx.whistle(); }
       else if(replay.active || goalAction > 0) skipCelebration();
     }
+    uiPrev.start = st.start;
 
     uiPrev.any  = st.any;  uiPrev.up   = st.up;   uiPrev.down = st.down;
     uiPrev.left = st.left; uiPrev.right = st.right;
@@ -1378,9 +1599,9 @@
   const CPU_LEVELS = [
     { name:'Fácil',   think:0.42, range:340, aim:0.50, sprint:0.30, charge:0.55,
       contain:0.30, switchGap:240, pass:0.22, slide:0.03 },
-    { name:'Normal',  think:0.17, range:520, aim:0.81, sprint:0.74, charge:0.87,
+    { name:'Normal',  think:0.17, range:520, aim:0.81, sprint:0.74, charge:0.70,
       contain:0.62, switchGap:150, pass:0.40, slide:0.08 },
-    { name:'Difícil', think:0.11, range:560, aim:0.90, sprint:0.88, charge:0.94,
+    { name:'Difícil', think:0.11, range:560, aim:0.90, sprint:0.88, charge:0.68,
       contain:0.80, switchGap:115, pass:0.52, slide:0.12 }
   ];
 
@@ -1570,7 +1791,12 @@
   function getInputFor(team, dt){
     if(isCpu(team)) return cpuInput(team, dt || 1/60);
     const pad = readPadInput(team.isP1 ? 0 : 1);
-    if(pad) return pad;
+    // A connected pad used to make the keyboard dead. Now the keyboard still
+    // works whenever the pad is idle, so a plugged-in controller nobody is
+    // holding does not lock a keyboard player out.
+    if(pad && (pad.dx || pad.dy || pad.kick || pad.power || pad.pass || pad.contain ||
+               pad.sprint || pad.modifier || pad.switchBtn ||
+               Math.abs(pad.rsx) > 0.3 || Math.abs(pad.rsy) > 0.3)) return pad;
     let dx = 0, dy = 0, kick = false, sprint = false, pass = false,
         power = false, contain = false, modifier = false;
     if(team.isP1){
@@ -1596,7 +1822,9 @@
       sprint  = !!keys['ControlRight'];
       modifier = !!keys['ShiftRight'];
     }
-    return {dx, dy, kick, pass, sprint, power, contain, modifier};
+    const kb = {dx, dy, kick, pass, sprint, power, contain, modifier, switchBtn:false, rsx:0, rsy:0};
+    if(pad && !(dx || dy || kick || pass || sprint || power || contain || modifier)) return pad;
+    return kb;
   }
 
   /* =========================================================
@@ -1626,9 +1854,28 @@
 
   // Every touch is routed through here, so a change of ball owner is detected in
   // exactly one place — and that change is what hands the player the controls.
+  // Possession has a little inertia. Two opponents standing on the same ball
+  // used to swap ownership every frame — each one's carry magnet dragging it
+  // 30px back across, the control ring flickering on both pads, nothing ever
+  // resolving until somebody slid. Taking the ball off the other side now
+  // holds it for a beat, during which a mere touch cannot take it back; a
+  // deliberate steal (contain, slide) still can.
+  const OWNER_DWELL = 0.22;
+  const STEAL_GUARD = 0.5;    // s a freshly won ball cannot be stolen straight back
+  function canPoach(p){
+    if(!ballOwner || ballOwner.side === p.side) return true;
+    if(ball.ownerLock > 0) return false;
+    // A ball at a man's feet is HIS: brushing past it does not take it. That
+    // is what contain (Y) and the slide (X) are for — and what the AI chaser
+    // does below. A loose ball (a heavy touch, a pass, a rebound) is anyone's.
+    const carried = ballDist(ballOwner) < CARRY_RANGE && ball.z <= REACH_LOW;
+    return !carried;
+  }
+
   function registerTouch(team, player){
     lastTouchTeam = team;
     if(!player || ballOwner === player) return;   // same carrier: nothing changed hands
+    if(ballOwner && ballOwner.side !== player.side) ball.ownerLock = OWNER_DWELL;
     ballOwner = player;
     if(player.role === 'GK') return;              // keepers are never user-controlled
     const idx = team.outfield.indexOf(player);
@@ -1683,12 +1930,14 @@
     ball.shotTimer = 1.3;
     ball.shotSide  = p.side;
     ball.shotPower = pw;
-    ball.shotSweet = false;
-    ball.shotFire  = fire;
+    ball.shotSweet  = false;
+    ball.shotCharge = 0;
+    ball.shotFire   = fire;
     // how far out it was struck from: a keeper has time to set himself for a
     // long shot, so distance is part of whether it beats him
     const tgoal = opponentGoal(tm);
     ball.shotDist = Math.hypot(tgoal.x - p.x, tgoal.y - p.y);
+    stats.shots[tm.isP1 ? 0 : 1]++;
     ball.shotId++;
     ball.heldBy = null;
     p.kickCooldown = 0.3;
@@ -1792,22 +2041,17 @@
     ball.loftTeam = null;
   }
 
+  // A ground pass to where the man WILL be. Aimed at his feet, a 300px pass
+  // took ~0.7 s to arrive and a running receiver had moved ~110px by then —
+  // every pass to a moving teammate landed behind him.
+  const PASS_LEAD = 11;   // frames of the receiver's motion to lead by
   function passToTeammate(team, p){
-    let best = null, bestScore = -Infinity;
-    const fx = p.facing.x, fy = p.facing.y;
-    const flen = Math.hypot(fx, fy) || 1;
-    for(const mate of team.outfield){
-      if(mate === p) continue;
-      const vx = mate.x - p.x, vy = mate.y - p.y;
-      const d = Math.hypot(vx, vy) || 1;
-      const align = ((vx/d) * (fx/flen) + (vy/d) * (fy/flen));
-      const score = align * 1.6 - d / 900;   // prefer mates ahead of the heading
-      if(score > bestScore){ bestScore = score; best = mate; }
-    }
+    const best = pickPassTarget(team, p);
     if(!best) return;
-    const vx = best.x - p.x, vy = best.y - p.y;
+    const lead = { x: best.x + best.vx * PASS_LEAD, y: best.y + best.vy * PASS_LEAD };
+    const vx = lead.x - p.x, vy = lead.y - p.y;
     const d = Math.hypot(vx, vy) || 1;
-    const power = Math.min(5.5 + d / 90, 13);
+    const power = Math.min(5.8 + d / 85, 13.5);
     ball.vx = (vx/d) * power;
     ball.vy = (vy/d) * power;
     ball.spin = 0.3;
@@ -1947,17 +2191,21 @@
     }
 
     if(bd < p.radius + ball.radius + CONTAIN_REACH && theirs && !ballLocked(p) &&
-       ball.z <= REACH_JUMP){
+       ball.z <= REACH_JUMP && ball.stealGuard <= 0){
       // knock it loose, away from the man who had it
       const power = 5.5;
       ball.vx = (bdx/bd) * power;
       ball.vy = (bdy/bd) * power;
       registerTouch(team, p);          // the steal makes you the owner -> you get control
+      // and the ball is yours for a beat: without this two men facing up on the
+      // same ball traded it four times a second and nobody ever got a shot off
+      ball.stealGuard = STEAL_GUARD;
       p.kickCooldown = 0.18;
       sfx.save();
       spawnParticles(ball.x, ball.y, 12, {
         speed: 3.2, life: 0.4, size: 3, color: 'rgba(255,235,170,0.9)'
       });
+      stats.steals[team.isP1 ? 0 : 1]++;
       flashStatus('¡Robo del equipo ' + team.name + '!');
       // a sharp jolt for the man robbed, a short one for the man who robbed him
       rumbleCooldown[victim.isP1 ? 0 : 1] = 0;
@@ -1986,7 +2234,7 @@
     team.charge = 0;
     team.chargeHeld = false;
     team.powerHeld = false;
-    sfx.wall();
+    sfx.slide();
     spawnParticles(p.x, p.y + 6, 14, {
       angle: Math.atan2(-p.facing.y, -p.facing.x), spread: 1.2,
       speed: 2.6, life: 0.5, size: 4, color: 'rgba(150,205,155,0.8)'
@@ -2022,6 +2270,7 @@
           spawnParticles(ball.x, ball.y, 12, {
             speed: 3, life: 0.4, size: 3, color: 'rgba(255,235,170,0.9)'
           });
+          stats.steals[team.isP1 ? 0 : 1]++;
           flashStatus('¡Barrida de ' + team.name + '!');
         }
       }
@@ -2071,18 +2320,28 @@
     const len = Math.hypot(input.dx, input.dy);
     let nx = len > 0.05 ? input.dx/len : 0;
     let ny = len > 0.05 ? input.dy/len : 0;
+    // how far the stick is pushed: a nudge is a walk, full is a run. The
+    // keyboard and the d-pad give ±1, so they are always at full.
+    const mag  = Math.min(1, len);
+    const walk = nx || ny ? WALK_MIN + (1 - WALK_MIN) * mag : 0;
 
     // sprint: the human's sprint is what drags the whole team along (see updateTeamSprint)
     const sprinting = !!input.sprint && (nx !== 0 || ny !== 0);
     // RT runs, RB modifies. They are separate buttons, so holding the modifier
     // is unambiguous — running never turns a shot into a lofted ball.
     const modHeld = !!input.modifier;
-    const containing = !!input.contain;
-    // The lunge is an ALTERNATIVE burst, not a bonus on top of sprinting:
-    // multiplying them let a player reach 2.4x speed just by mashing the shoot
-    // button with no ball, which was faster than anything else in the game.
-    const burst = Math.max(sprinting ? p.sprintMult : 1, p.lungeTimer > 0 ? 1.5 : 1);
-    const spd = p.speed * 1.1 * burst * (containing ? 1.12 : 1);
+    // Containing is a defensive button. With the ball at your own feet it used
+    // to lock your heading onto the ball and let you strafe-dribble at +12%
+    // with the ball glued, so it is simply ignored while you are the carrier.
+    const ownBall = ballOwner === p && ballDist(p) < CARRY_RANGE;
+    const containing = !!input.contain && !ownBall;
+    // Every burst is an ALTERNATIVE, never a bonus on top of another: the
+    // lunge used to multiply with sprint (2.4x), and contain used to multiply
+    // with both (sprint+contain was the fastest thing in the game).
+    const burst = Math.max(sprinting ? p.sprintMult : 1,
+                           p.lungeTimer > 0 ? 1.5 : 1,
+                           containing ? 1.12 : 1);
+    const spd = p.speed * 1.1 * burst * walk;
     team.sprintInput = sprinting;
 
     p.vx = nx * spd;
@@ -2100,7 +2359,7 @@
     if(team.passCooldown > 0) team.passCooldown -= dt;
 
     // pressing the shoot button is also how you go up for a high ball
-    const touching = canTouch(p, !!input.kick || !!input.power) && !ballLocked(p);
+    const touching = canTouch(p, !!input.kick || !!input.power) && !ballLocked(p) && canPoach(p);
     if(touching) registerTouch(team, p);
 
     // you are carrying the ball if you own it and it is still at your feet
@@ -2124,7 +2383,16 @@
 
     if(wantPower){
       if(!team.chargeHeld) team.modArmed = false;   // new wind-up: clear the modifier
+      const before = team.charge;
       team.charge = Math.min(team.charge + dt / POWER_TIME, 1);
+      // The sweet band is ten frames wide and drawn under a moving 16px man,
+      // which nobody can watch while lining up a keeper. So it ticks: a bright
+      // click and a tap of rumble on the way in, a dull one on the way out.
+      if(before < SWEET_MIN && team.charge >= SWEET_MIN){
+        sfx.sweetIn(); rumble(team.isP1 ? 0 : 1, 0.25, 0.12, 45);
+      } else if(before <= SWEET_MAX && team.charge > SWEET_MAX){
+        sfx.sweetOut();
+      }
       team.chargeKind = 'power';
       team.chargeHeld = true;
       team.powerHeld  = true;
@@ -2141,7 +2409,8 @@
         const spread  = sweet ? 0.015 : 0.055 + overhit * 0.11;
         aimAtGoal(p, team, sweet ? 0.80 : 0.55);
         shoot(p, power, spread, true);   // B is the only thing that spends a fire shot
-        ball.shotSweet = sweet;
+        ball.shotSweet  = sweet;
+        ball.shotCharge = c;             // the keeper reads an overhit (see keeperBeatChance)
         // B + a tap of RB curls it around the keeper
         if(team.modArmed || modHeld){
           applyCurl(team, p, c);
@@ -2204,7 +2473,10 @@
         } else {
           passToTeammate(team, p);
         }
-      } else if(p.slideTimer <= 0 && p.downTimer <= 0){
+      } else if(p.slideTimer <= 0 && p.downTimer <= 0 &&
+                !(ballOwner && ballOwner.side === p.side && ballDist(p) < CARRY_RANGE * 1.4)){
+        // pressing X next to a TEAMMATE's ball is asking for it, not a tackle:
+        // it used to commit you to a 1.45 s slide at your own man's feet
         startSlide(team, p);
       }
     }
@@ -2240,6 +2512,9 @@
   const AI_PULL       = { DEF:{x:0.20, y:0.34}, MID:{x:0.34, y:0.44}, FWD:{x:0.42, y:0.46} };
   const ROLE_ADVANCE  = { DEF:0.62, MID:0.95, FWD:1.28 };
   const MAX_ADVANCE   = 150;
+  const AI_FINISH_RANGE  = 380;   // px from goal inside which a teammate finishes first time instead of handing you the ball
+  const AI_CONTAIN_RANGE = 80;    // px from the ball at which a chaser starts to close a carrier down
+  const AI_CONTAIN_DELAY = 0.75;  // s of pressure before he actually takes it: a B wind-up is ~0.8 s, so you can still get a shot away if you are quick
   const ADVANCE_SMOOTH= 1.7;
   const SPRINT_RAMP   = 4.5;   // how fast teammates pick up the pace
   const SPRINT_DECAY  = 2.4;   // how fast they settle back down
@@ -2294,6 +2569,10 @@
     const humanOnBall = controlledDist < KEEP_BALL_RANGE + 10;
     const chaseAllowed = chaserDist < controlledDist + 110 &&
                          !(humanOnBall && controlledDist < chaserDist);
+    // shape depends on phase: with the ball in their half, we push men forward
+    const attacking = lastTouchTeam === team && ballIsInHalf(team, 'opp');
+    const fwdDir    = team.side === 'left' ? 1 : -1;
+    const boxEdge   = team.side === 'left' ? W - FIELD_MARGIN - 48 : FIELD_MARGIN + 48;
 
     team.outfield.forEach((pl, idx) => {
       if(idx === team.controlledIndex) return;
@@ -2315,6 +2594,19 @@
         targetX = ball.x - (gdx/glen) * 16;
         targetY = ball.y - (gdy/glen) * 16;
         urgency = 1.0;
+      } else if(attacking && pl.role === 'FWD'){
+        // Get in the box. The ball-following shape could never put a forward
+        // past the 18-yard line (a left FWD topped out at x≈1193 against a box
+        // edge of 1404), so every attack was a solo run with nobody to cross to.
+        // The two forwards split the goal mouth: one near post, one far.
+        targetX = ball.x + fwdDir * 190;
+        targetX = fwdDir > 0 ? Math.min(targetX, boxEdge) : Math.max(targetX, boxEdge);
+        targetY = H/2 + (pl.slot >= 0 ? 1 : -1) * GOAL_WIDTH * 0.42;
+        urgency = 0.95;
+      } else if(attacking && pl.role === 'MID'){
+        // square support, holding width for the cut-back
+        targetX = ball.x - fwdDir * 70;
+        targetY = pl.home.y + (ball.y - pl.home.y) * 0.30;
       } else {
         targetX = dynamicHomeX + (ball.x - dynamicHomeX) * pull.x;
         targetY = pl.home.y   + (ball.y - pl.home.y)   * pull.y;
@@ -2347,11 +2639,31 @@
       pl.y += pl.vy * dt * 60;
       clampToPitch(pl);
 
+      // A defender closing down a carrier does what a human does: faces up
+      // and takes it — but not instantly. The dribbler gets a window to move
+      // it on, which is what makes the pressure readable instead of a wall.
+      const foeCarrying = ballOwner && ballOwner.side !== team.side &&
+                          ballDist(ballOwner) < CARRY_RANGE && ball.z <= REACH_LOW;
+      if(idx === chaserIdx && foeCarrying && ballDist(pl) < AI_CONTAIN_RANGE && ball.stealGuard <= 0){
+        pl.containT = (pl.containT || 0) + dt;
+        if(pl.containT > AI_CONTAIN_DELAY && containAndSteal(team, pl)) return;
+      } else {
+        pl.containT = 0;
+      }
+
       // AI ball interaction: shoot near goal, otherwise drive the ball forward
-      if(canTouch(pl, true) && !ballLocked(pl)){
+      if(canTouch(pl, true) && !ballLocked(pl) && canPoach(pl)){
         registerTouch(team, pl);   // a change of owner hands you the controls
+        // ...and if it just did, this is YOUR man now. He used to fire a shot
+        // on the very frame he became yours — "I got the ball and it just
+        // booted it away" — because the controlled check ran before the touch.
         const goal = opponentGoal(team);
         const distToGoal = Math.hypot(goal.x - pl.x, goal.y - pl.y);
+        // ...but a striker meeting a cross or a rebound in front of goal still
+        // finishes first time: that is the one boot you DO want him to take.
+        // The machine has no "me" to annoy, so it keeps the whole old behaviour.
+        const finishing = distToGoal < AI_FINISH_RANGE && ballIsInHalf(team, 'opp');
+        if(getControlled(team) === pl && !isCpu(team) && !finishing) return;
         if(pl.kickCooldown <= 0 && distToGoal < 470 && ballIsInHalf(team, 'opp')){
           const gdx = goal.x - pl.x, gdy = (goal.y + (Math.random()-0.5)*GOAL_WIDTH*0.55) - pl.y;
           const glen = Math.hypot(gdx, gdy) || 1;
@@ -2488,6 +2800,11 @@
     const n = clamp01((ball.shotPower - MIN_SHOT) / (POWER_MAX - MIN_SHOT));
     let c = 0.06 + 0.30 * n;
     if(ball.shotSweet) c += 0.12;   // helps, but never a guarantee
+    // Leaning back on it past the sweet band is the easy option — you just
+    // hold the button — and it used to be nearly as good (36% vs 41%). Now an
+    // overhit goes at the keeper harder but is much easier for him to hold.
+    const overhit = clamp01(((ball.shotCharge || 0) - SWEET_MAX) / (1 - SWEET_MAX));
+    c *= 1 - overhit * 0.45;
     return Math.min(c, BEAT_CAP) * dm;
   }
 
@@ -2724,7 +3041,11 @@
         spawnParticles(ball.x, ball.y, 14, {
           speed: 3, life: 0.45, size: 3, color: 'rgba(255,255,255,0.85)'
         });
-        if(wasShot) flashStatus('¡Atajada del arquero ' + team.name + '!');
+        if(wasShot){
+          stats.saves[team.isP1 ? 0 : 1]++;
+          stats.onTarget[team.isP1 ? 1 : 0]++;   // the OTHER side put it on target
+          flashStatus('¡Atajada del arquero ' + team.name + '!', 'play');
+        }
       } else {
         // outside the area it cannot handle it, so it plays it away with its
         // feet — still aimed at a teammate where there is one, just less precise
@@ -2862,7 +3183,8 @@
   function clang(){
     if(clangCooldown > 0) return;
     clangCooldown = 0.35;
-    sfx.wall();
+    if(ball.shotSide) stats.posts[ball.shotSide === team1.side ? 0 : 1]++;
+    sfx.post();
     sfx.kick(0.9);
     shake = Math.max(shake, 9);
     flashStatus('¡Al palo!');
@@ -2874,6 +3196,8 @@
   function updateBall(dt){
     if(ball.shotTimer > 0) ball.shotTimer -= dt;
     if(ball.releaseGuard > 0) ball.releaseGuard -= dt;
+    if(ball.ownerLock    > 0) ball.ownerLock    -= dt;
+    if(ball.stealGuard   > 0) ball.stealGuard   -= dt;
     if(clangCooldown > 0) clangCooldown -= dt;
     if(ball.heldBy){ ball.trail.length = 0; ball.z = 0; ball.vz = 0; return; }
 
@@ -2981,7 +3305,7 @@
   /* =========================================================
      Drawing — pitch
      ========================================================= */
-  let fieldCache = null, fieldCacheKey = '';
+  let fieldCache = null, fieldCacheW = 0, fieldCacheH = 0;
 
   function buildFieldCache(){
     // Built at the REAL pixel size of the canvas, not at 1600x900, so the
@@ -3056,8 +3380,8 @@
 
     // soft lighting across the pitch
     const light = c.createRadialGradient(W/2, H/2, 120, W/2, H/2, W*0.72);
-    light.addColorStop(0, 'rgba(255,255,255,0.10)');
-    light.addColorStop(1, 'rgba(0,0,0,0.30)');
+    light.addColorStop(0, 'rgba(255,255,255,0.05)');
+    light.addColorStop(1, 'rgba(0,0,0,0.14)');
     c.fillStyle = light;
     c.fillRect(FIELD_MARGIN, FIELD_MARGIN, W - FIELD_MARGIN*2, pitchH);
 
@@ -3124,7 +3448,7 @@
     });
 
     fieldCache = off;
-    fieldCacheKey = off.width + 'x' + off.height;
+    fieldCacheW = off.width; fieldCacheH = off.height;
   }
 
   function drawGoals(){
@@ -3716,7 +4040,7 @@
       }
       if(replay.t >= replay.span + REPLAY_HOLD){
         replay.active = false;
-        resetPositions();
+        resetPositions(restartTeam);
         kickoffTimer = 1.2;
       }
       return;
@@ -3793,7 +4117,7 @@
   function skipCelebration(){
     if(replay.active){
       replay.active = false;
-      resetPositions();
+      resetPositions(restartTeam);
       kickoffTimer = 1.2;
       restoreMatchCamera();
       return true;
@@ -3944,6 +4268,12 @@
     const halfW3 = (W * S3) / 2;
     const halfH3 = (H * S3) / 2;
 
+    // one material per colour, shared by everybody: this used to allocate a
+    // fresh material per person, twice — 1344 materials and as many program
+    // switches per frame, before a single player was drawn
+    const crowdBodyMats = CROWD_COLORS.map(c => new THREE.MeshLambertMaterial({ color: new THREE.Color(c) }));
+    const crowdHeadMats = [new THREE.MeshLambertMaterial({ color: 0xd8a87a }),
+                           new THREE.MeshLambertMaterial({ color: 0x6b4a33 })];
     const concrete = new THREE.MeshLambertMaterial({ color: 0x5b6570 });
     const concreteDark = new THREE.MeshLambertMaterial({ color: 0x424b55 });
     const railMat  = new THREE.MeshLambertMaterial({ color: 0x8d99a6 });
@@ -3983,12 +4313,11 @@
         for(let i = 0; i < perRow; i++){
           const t = (i / (perRow - 1) - 0.5) * len * 0.94;
           const g = new THREE.Group();
-          const col = new THREE.Color(CROWD_COLORS[(i * 5 + r * 3) % CROWD_COLORS.length]);
-          const body = new THREE.Mesh(geoBody, new THREE.MeshLambertMaterial({ color: col }));
+          const body = new THREE.Mesh(geoBody, crowdBodyMats[(i * 5 + r * 3) % crowdBodyMats.length]);
           body.position.y = 0.52;
           g.add(body);
           const head = new THREE.Mesh(geoHead,
-            new THREE.MeshLambertMaterial({ color: (i + r) % 4 ? 0xd8a87a : 0x6b4a33 }));
+            crowdHeadMats[(i + r) % 4 ? 0 : 1]);
           head.position.y = 1.28;
           g.add(head);
           g.position.set(cx + alongX * t + dirX * (back - 0.4), lift,
@@ -4056,6 +4385,7 @@
   const FLAG_COLS = 14, FLAG_ROWS = 9;
   const FLAG_W = 11, FLAG_H = 7;
   const PRIDE = [0xe40303, 0xff8c00, 0xffed00, 0x008026, 0x004dff, 0x750787];
+  const PRIDE_C = (typeof THREE !== 'undefined') ? PRIDE.map(h => new THREE.Color(h)) : [];   // built once, not 16 times a frame
 
   function buildFlag(x, z){
     const pts = [];
@@ -4090,8 +4420,10 @@
   function updateFlag(f, dt, now){
     const step = Math.min(dt, 1/40);
     const wind = 9 + Math.sin(now * 0.0011) * 5;
-    for(const p of f.pts){
-      if(p.pin){ p.x = 0; p.y = -(f.pts.indexOf(p) / FLAG_COLS | 0) * f.dy; p.z = 0; continue; }
+    for(let i = 0; i < f.pts.length; i++){
+      const p = f.pts[i];
+      // (was an indexOf inside the hot loop: a linear scan per pinned point per frame)
+      if(p.pin){ p.x = 0; p.y = -((i / FLAG_COLS) | 0) * f.dy; p.z = 0; continue; }
       // verlet: the previous position carries the velocity
       const vx = (p.x - p.px) * 0.985, vy = (p.y - p.py) * 0.985, vz = (p.z - p.pz) * 0.985;
       p.px = p.x; p.py = p.y; p.pz = p.z;
@@ -4109,18 +4441,20 @@
         }
       }
     }
-    // rebuild the triangles
+    // rebuild the triangles — no per-quad arrays or closures, no per-row Colors
     let k = 0, kc = 0;
+    const pos = f.pos, col = f.col, top = f.top;
+    const put = (p, band) => {
+      pos[k++] = p.x; pos[k++] = p.y + top; pos[k++] = p.z;
+      col[kc++] = band.r; col[kc++] = band.g; col[kc++] = band.b;
+    };
     for(let r = 0; r < FLAG_ROWS - 1; r++){
-      const band = new THREE.Color(PRIDE[Math.min(PRIDE.length - 1,
-                     Math.floor(r / (FLAG_ROWS - 1) * PRIDE.length))]);
+      const band = PRIDE_C[Math.min(PRIDE_C.length - 1, Math.floor(r / (FLAG_ROWS - 1) * PRIDE_C.length))];
       for(let c = 0; c < FLAG_COLS - 1; c++){
         const a = f.pts[r * FLAG_COLS + c],     b = f.pts[r * FLAG_COLS + c + 1];
         const d = f.pts[(r+1) * FLAG_COLS + c], e = f.pts[(r+1) * FLAG_COLS + c + 1];
-        [a, b, d, b, e, d].forEach(function(p){
-          f.pos[k++] = p.x; f.pos[k++] = p.y + f.top; f.pos[k++] = p.z;
-          f.col[kc++] = band.r; f.col[kc++] = band.g; f.col[kc++] = band.b;
-        });
+        put(a, band); put(b, band); put(d, band);
+        put(b, band); put(e, band); put(d, band);
       }
     }
     f.geo.attributes.position.needsUpdate = true;
@@ -4146,33 +4480,40 @@
     const lines = (NET_ROWS * (NET_COLS - 1) + NET_COLS * (NET_ROWS - 1));
     const pos = new Float32Array(lines * 2 * 3);
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    // brighter and a touch blue, so the mesh separates from the white posts —
+    // at one device pixel and 45% alpha it barely read at all
     const mesh = new THREE.LineSegments(geo,
-      new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.45 }));
+      new THREE.LineBasicMaterial({ color: 0xdde9ff, transparent: true, opacity: 0.66 }));
     g3.scene.add(mesh);
     return { side, gx, dir, halfW3, hgt, geo, pos, mesh };
   }
 
+  // Zero allocations, and nothing at all while the cloth is asleep. This used
+  // to build ~1500 throwaway arrays per frame and re-upload both nets every
+  // frame whether or not a single knot had moved — the main GC spike source.
   function updateNet3d(n){
     const net = nets[n.side];
-    const p = n.pos;
+    if(net.energy <= 0 && n.uploaded) return;
+    const p = n.pos, gx = n.gx, dir = n.dir, halfW = GOAL_WIDTH / 2;
+    const u = net.u, v = net.v, w = net.w;
     let k = 0;
     // goal space (u = depth in, v = height, w = across) -> world
-    const node = (c, r) => {
-      const i = r * NET_COLS + c;
-      const x = n.gx - n.dir * net.u[i] * S3;
-      const y = net.v[i] * S3;
-      const z = (net.w[i] - GOAL_WIDTH / 2) * S3;
-      return [x, y, z];
-    };
-    const push = (a, b) => {
-      p[k++]=a[0]; p[k++]=a[1]; p[k++]=a[2];
-      p[k++]=b[0]; p[k++]=b[1]; p[k++]=b[2];
-    };
-    for(let r = 0; r < NET_ROWS; r++)
-      for(let c = 0; c < NET_COLS - 1; c++) push(node(c, r), node(c + 1, r));
-    for(let c = 0; c < NET_COLS; c++)
-      for(let r = 0; r < NET_ROWS - 1; r++) push(node(c, r), node(c, r + 1));
+    for(let r = 0; r < NET_ROWS; r++){
+      for(let c = 0; c < NET_COLS - 1; c++){
+        const i = r * NET_COLS + c, j = i + 1;
+        p[k++] = gx - dir * u[i] * S3; p[k++] = v[i] * S3; p[k++] = (w[i] - halfW) * S3;
+        p[k++] = gx - dir * u[j] * S3; p[k++] = v[j] * S3; p[k++] = (w[j] - halfW) * S3;
+      }
+    }
+    for(let c = 0; c < NET_COLS; c++){
+      for(let r = 0; r < NET_ROWS - 1; r++){
+        const i = r * NET_COLS + c, j = i + NET_COLS;
+        p[k++] = gx - dir * u[i] * S3; p[k++] = v[i] * S3; p[k++] = (w[i] - halfW) * S3;
+        p[k++] = gx - dir * u[j] * S3; p[k++] = v[j] * S3; p[k++] = (w[j] - halfW) * S3;
+      }
+    }
     n.geo.attributes.position.needsUpdate = true;
+    n.uploaded = true;
   }
 
 
@@ -4265,6 +4606,7 @@
   }
 
   function updateCheerBits(dt){
+    const f = dt * 60;
     const cb = g3.cheer;
     if(!cb || !cb.live) return;
     let alive = 0;
@@ -4274,7 +4616,7 @@
       b.life -= dt;
       if(b.life <= 0){ cb.bits[i] = null; cb.pos[i*3+1] = -999; continue; }
       b.vy -= 2.2 * dt;
-      b.x += b.vx; b.y += b.vy; b.z += b.vz;
+      b.x += b.vx * f; b.y += b.vy * f; b.z += b.vz * f;   // was per-frame: confetti fell 2.4x faster at 144 Hz
       if(b.y < 0.2){ b.y = 0.2; b.vy = 0; b.vx *= 0.9; b.vz *= 0.9; }
       cb.pos[i*3] = b.x; cb.pos[i*3+1] = b.y; cb.pos[i*3+2] = b.z;
       alive++;
@@ -4408,12 +4750,16 @@
     }
   }
 
-  function restoreMatchCamera(){
+  // Back to the match lens. Per frame (with dt) it eases from wherever the
+  // replay left the FOV instead of snapping 30 -> 42 in one frame; a skip
+  // (no dt) still snaps, because the cut is the point of a skip.
+  function restoreMatchCamera(dt){
     if(!g3.ready) return;
-    if(g3.camera.fov !== 42){
-      g3.camera.fov = 42;
-      g3.camera.updateProjectionMatrix();
-    }
+    const cur = g3.camera.fov;
+    if(cur === 42) return;
+    const next = dt ? cur + (42 - cur) * Math.min(1, dt * 5) : 42;
+    g3.camera.fov = Math.abs(42 - next) < 0.3 ? 42 : next;
+    g3.camera.updateProjectionMatrix();
   }
 
   /* ---- shot power, above the player ----
@@ -4587,6 +4933,105 @@
      smeared along its current heading, so a curled shot leaves a curved tail.
      Only shows when the ball is genuinely moving or in the air — a ball being
      dribbled should not have a tail. */
+  /* ---- small textures and props for the 3D scene ---- */
+  function skyGradTex(){
+    const c = document.createElement('canvas'); c.width = 4; c.height = 256;
+    const x = c.getContext('2d');
+    const g = x.createLinearGradient(0, 0, 0, 256);
+    g.addColorStop(0,    '#04070d');
+    g.addColorStop(0.55, '#0e1828');
+    g.addColorStop(1,    '#1c2c42');
+    x.fillStyle = g; x.fillRect(0, 0, 4, 256);
+    const t = new THREE.CanvasTexture(c);
+    if(THREE.sRGBEncoding !== undefined) t.encoding = THREE.sRGBEncoding;
+    return t;
+  }
+  // a radial blob: shared by the ball shadow and every player's contact shadow
+  function softShadowTex(){
+    const c = document.createElement('canvas'); c.width = 64; c.height = 64;
+    const x = c.getContext('2d');
+    const g = x.createRadialGradient(32, 32, 4, 32, 32, 32);
+    g.addColorStop(0, 'rgba(0,0,0,0.6)');
+    g.addColorStop(0.6, 'rgba(0,0,0,0.22)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    x.fillStyle = g; x.fillRect(0, 0, 64, 64);
+    return new THREE.CanvasTexture(c);
+  }
+  // LED hoardings: self-lit panels with the sponsors this league deserves
+  const SPONSORS = ['PASTOS AL PESTO', 'KK SPORTS', 'PENÉLOPE TV', 'CHANCLA AIR',
+                    'DON CANGREJO SEGUROS', 'PELUSA COLA', 'FC 27', 'LA FOCA BANK'];
+  function hoardingTex(){
+    const c = document.createElement('canvas'); c.width = 2048; c.height = 96;
+    const x = c.getContext('2d');
+    const cols = ['#1e3a8a', '#b91c1c', '#f2c14e', '#065f46', '#4c1d95', '#0e7490', '#111827', '#9a3412'];
+    const n = SPONSORS.length, w = c.width / n;
+    x.textAlign = 'center'; x.textBaseline = 'middle';
+    for(let i = 0; i < n; i++){
+      x.fillStyle = cols[i % cols.length]; x.fillRect(i * w, 0, w, c.height);
+      x.fillStyle = i === 2 ? '#08150e' : '#ffffff';
+      x.font = '900 40px "Segoe UI", sans-serif';
+      x.fillText(SPONSORS[i], i * w + w / 2, c.height / 2 + 2);
+    }
+    const t = new THREE.CanvasTexture(c);
+    if(THREE.sRGBEncoding !== undefined) t.encoding = THREE.sRGBEncoding;
+    t.wrapS = THREE.RepeatWrapping;
+    return t;
+  }
+  function buildHoardings(){
+    const tex = hoardingTex();
+    const halfX = (W * S3) / 2 + 6, halfZ = (H * S3) / 2 + 4;
+    const hgt = 1.5;
+    const mk = (len, x, z, rotY, repeat, offset) => {
+      const m = new THREE.Mesh(
+        new THREE.BoxGeometry(len, hgt, 0.3),
+        [null, null, null, null, new THREE.MeshBasicMaterial({ map: tex }), new THREE.MeshBasicMaterial({ color: 0x111827 })]
+          .map(mm => mm || new THREE.MeshBasicMaterial({ color: 0x111827 }))
+      );
+      m.position.set(x, hgt / 2, z);
+      m.rotation.y = rotY;
+      g3.scene.add(m);
+      return m;
+    };
+    // one texture strip, repeated along each board so the panels stay square
+    if(tex.repeat) tex.repeat.set(2.4, 1);
+    mk(halfX * 2, 0, -halfZ, 0);            // far touchline (faces the camera)
+    mk(halfX * 2, 0,  halfZ, Math.PI);      // near touchline
+    mk(halfZ * 2, -halfX, 0,  Math.PI / 2); // behind the left goal
+    mk(halfZ * 2,  halfX, 0, -Math.PI / 2); // behind the right goal
+  }
+
+  /* ---- ground particles ----
+     Kick dust, slide spray, tackle bursts, the goal burst: seventeen call sites
+     spawn them and every one was drawn on the 2D canvas only, so the 3D view
+     had no impact feedback at all. One THREE.Points reads the same array. */
+  const GB_MAX = 160;
+  function buildGroundBits(){
+    const geo = new THREE.BufferGeometry();
+    const pos = new Float32Array(GB_MAX * 3);
+    for(let i = 0; i < GB_MAX; i++) pos[i*3+1] = -999;
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const pts = new THREE.Points(geo, new THREE.PointsMaterial({
+      color: 0xe6f3da, size: 0.6, transparent: true, opacity: 0.75, depthWrite: false }));
+    pts.frustumCulled = false;
+    g3.scene.add(pts);
+    return { geo, pos, pts };
+  }
+  function updateGroundBits(){
+    const gb = g3.bits;
+    if(!gb) return;
+    const n = Math.min(particles.length, GB_MAX), pos = gb.pos;
+    for(let i = 0; i < GB_MAX; i++){
+      if(i >= n){ pos[i*3+1] = -999; continue; }
+      const p = particles[i];
+      const age = 1 - p.life / p.maxLife;
+      pos[i*3]   = wx(p.x);
+      pos[i*3+1] = 0.25 + age * 1.1;       // lifts off the grass as it fades
+      pos[i*3+2] = wz(p.y);
+    }
+    gb.geo.attributes.position.needsUpdate = true;
+    gb.pts.visible = n > 0;
+  }
+
   const TRAIL_N = 16;
   function buildBallTrail(){
     const ghosts = [];
@@ -4757,24 +5202,41 @@
     }
   }
 
+  // The player is two groups. `rig` holds everything that animates — torso,
+  // head, legs, hair — and is what tilts for a slide or a fall. The root
+  // holds the selection ring and the name tag, which must NOT tilt: the old
+  // single group took the ring edge-on and dropped the tag to the grass at
+  // exactly the moment you were sliding and most needed to know who you had.
   function makePlayerMesh(p){
     const group = new THREE.Group();
+    const rig   = new THREE.Group();
+    rig.rotation.order = 'YXZ';
+    group.add(rig);
     const col   = new THREE.Color(p.role === 'GK' ? '#f3f5f0' : p.color);
     const r     = p.radius * S3;
 
+    // torso sits on top of the legs instead of reaching the ground
     const body = new THREE.Mesh(
-      new THREE.CylinderGeometry(r * 0.78, r, r * 3.1, 14),
+      new THREE.CylinderGeometry(r * 0.78, r * 0.92, r * 1.95, 14),
       new THREE.MeshLambertMaterial({ color: col })
     );
-    body.position.y = r * 1.55;
-    group.add(body);
+    body.position.y = r * 2.12;
+    rig.add(body);
+
+    // legs: two boxes that swing while he runs (see draw3d)
+    const legMat = new THREE.MeshLambertMaterial({ color: 0x26303a });
+    const legL = new THREE.Mesh(new THREE.BoxGeometry(r * 0.36, r * 1.3, r * 0.34), legMat);
+    const legR = new THREE.Mesh(new THREE.BoxGeometry(r * 0.36, r * 1.3, r * 0.34), legMat);
+    legL.position.set(-r * 0.34, r * 0.65, 0);
+    legR.position.set( r * 0.34, r * 0.65, 0);
+    rig.add(legL); rig.add(legR);
 
     const head = new THREE.Mesh(
       new THREE.SphereGeometry(r * 0.72, 14, 10),
       new THREE.MeshLambertMaterial({ color: '#e8b98c' })
     );
     head.position.y = r * 3.5;
-    group.add(head);
+    rig.add(head);
 
     // a small wedge so you can read which way he is facing
     const nose = new THREE.Mesh(
@@ -4783,7 +5245,17 @@
     );
     nose.rotation.x = Math.PI / 2;
     nose.position.set(0, r * 2.2, r * 1.0);
-    group.add(nose);
+    rig.add(nose);
+
+    // keepers wear white for both sides; a band in the team colour tells them apart
+    if(p.role === 'GK'){
+      const band = new THREE.Mesh(
+        new THREE.CylinderGeometry(r * 0.86, r * 0.92, r * 0.5, 14),
+        new THREE.MeshLambertMaterial({ color: new THREE.Color(p.color) })
+      );
+      band.position.y = r * 2.45;
+      rig.add(band);
+    }
 
     // ring under the player you are controlling
     const ring = new THREE.Mesh(
@@ -4796,16 +5268,29 @@
     ring.visible = false;
     group.add(ring);
 
-    if(p.name){
-      const tag = nameSprite(p.name, p.role === 'GK' ? '#cfe9d4' : '#ffffff');
-      tag.position.y = r * 5.4;
-      group.add(tag);
-      group.userData = { body, head, nose, ring, tag, base:r };
-      addHair(group, p, r);
-      return group;
+    // a soft contact shadow at his feet: the key light throws the real shadow
+    // a few units away, so without this he reads as slightly hovering
+    if(g3.softShadow){
+      const blob = new THREE.Mesh(
+        new THREE.PlaneGeometry(r * 3.2, r * 3.2),
+        new THREE.MeshBasicMaterial({ map: g3.softShadow, transparent: true, opacity: 0.32, depthWrite: false })
+      );
+      blob.rotation.x = -Math.PI / 2;
+      blob.position.y = 0.03;
+      group.add(blob);
     }
-    group.userData = { body, head, nose, ring, base:r };
-    addHair(group, p, r);
+
+    let tag = null;
+    if(p.name){
+      tag = nameSprite(p.name, p.role === 'GK' ? '#cfe9d4' : '#ffffff');
+      tag.position.y = r * 5.4;
+      // never let a label punch through a post or the near stand
+      tag.material.depthTest = false; tag.material.depthWrite = false;
+      tag.renderOrder = 5;
+      group.add(tag);
+    }
+    group.userData = { rig, body, head, nose, ring, tag, legL, legR, base:r };
+    addHair(rig, p, r);
     return group;
   }
 
@@ -4832,13 +5317,16 @@
     // the pitch: the very same canvas the 2D view draws its lines on
     if(!fieldCache) buildFieldCache();
     const tex = new THREE.CanvasTexture(fieldCache);
-    tex.anisotropy = 4;
+    tex.anisotropy = g3.renderer.capabilities ? g3.renderer.capabilities.getMaxAnisotropy() : 4;
     // A canvas is sRGB data. Without saying so it gets treated as linear and
     // the grass comes out dark and muddy — which was most of why the lighting
     // looked wrong.
     if(THREE.sRGBEncoding !== undefined) tex.encoding = THREE.sRGBEncoding;
+    // Lambert in r128 is lit PER VERTEX. On a 4-vertex plane that meant the
+    // four floodlight pools and the fire orb's glow were sampled at exactly
+    // four points — i.e. never seen. ~1300 verts is still one draw call.
     const pitch = new THREE.Mesh(
-      new THREE.PlaneGeometry(W * S3, H * S3),
+      new THREE.PlaneGeometry(W * S3, H * S3, 48, 27),
       new THREE.MeshLambertMaterial({ map: tex })
     );
     pitch.rotation.x = -Math.PI / 2;
@@ -4848,7 +5336,7 @@
 
     // a bit of ground around the touchlines so the pitch is not floating
     const surround = new THREE.Mesh(
-      new THREE.PlaneGeometry(W * S3 * 2.1, H * S3 * 2.6),
+      new THREE.PlaneGeometry(W * S3 * 2.1, H * S3 * 2.6, 12, 12),
       new THREE.MeshLambertMaterial({ color: 0x1b3626 })
     );
     surround.rotation.x = -Math.PI / 2;
@@ -4856,23 +5344,53 @@
     surround.receiveShadow = true;
     g3.scene.add(surround);
 
+    // The sky: a gradient sphere seen from inside. There was nothing behind
+    // the stands but the clear colour, and the fog started at 150 units when
+    // nothing in the scene is ever that far from the camera — so it never
+    // touched a single pixel. Now it starts on the far stand.
+    g3.scene.fog = new THREE.Fog(0x101a2a, 70, 230);
+    g3.renderer.setClearColor(0x101a2a, 1);
+    const sky = new THREE.Mesh(
+      new THREE.SphereGeometry(300, 16, 10),
+      new THREE.MeshBasicMaterial({ map: skyGradTex(), side: THREE.BackSide, fog: false, depthWrite: false })
+    );
+    g3.scene.add(sky);
+
+    // advertising hoardings round the pitch: the cheapest "real stadium" cue
+    // there is, and they hide the seam where the grass meets the surround
+    buildHoardings();
+    g3.bits = buildGroundBits();
+    g3.axis = new THREE.Vector3();
+    g3.softShadow = softShadowTex();
+
     // goal frames
     const postMat = new THREE.MeshLambertMaterial({ color: 0xf7f7f2 });
     [[FIELD_MARGIN, 1], [W - FIELD_MARGIN, -1]].forEach(function(pair){
       const gx = pair[0], dir = pair[1];
       const halfW3 = (GOAL_WIDTH / 2) * S3;
-      const hgt = GOAL_H3, depth = GOAL_DEPTH * S3, th = 0.22;
+      const hgt = GOAL_H3, depth = GOAL_DEPTH * S3, pr = 0.14;
       const frame = new THREE.Group();
+      // round posts and bar, like real ones — the square 0.22 boxes read as
+      // flat sticks — plus the back frame so the goal has a silhouette from
+      // behind: two stanchions leaning back to a ground bar
       [-halfW3, halfW3].forEach(function(zz){
-        const post = new THREE.Mesh(new THREE.BoxGeometry(th, hgt, th), postMat);
+        const post = new THREE.Mesh(new THREE.CylinderGeometry(pr, pr, hgt, 10), postMat);
         post.position.set(0, hgt/2, zz);
         frame.add(post);
+        const stLen = Math.hypot(depth, hgt);
+        const st = new THREE.Mesh(new THREE.CylinderGeometry(pr * 0.7, pr * 0.7, stLen, 8), postMat);
+        st.position.set(-dir * depth / 2, hgt / 2, zz);
+        st.rotation.z = -dir * Math.atan2(depth, hgt);
+        frame.add(st);
       });
-      const bar = new THREE.Mesh(new THREE.BoxGeometry(th, th, halfW3 * 2), postMat);
+      const bar = new THREE.Mesh(new THREE.CylinderGeometry(pr, pr, halfW3 * 2, 10), postMat);
+      bar.rotation.x = Math.PI / 2;
       bar.position.set(0, hgt, 0);
       frame.add(bar);
-      // side panels, so the goal reads as a box from any angle
-      [[-1, 1]].forEach(function(){});
+      const ground = new THREE.Mesh(new THREE.CylinderGeometry(pr * 0.7, pr * 0.7, halfW3 * 2, 8), postMat);
+      ground.rotation.x = Math.PI / 2;
+      ground.position.set(-dir * depth, 0.1, 0);
+      frame.add(ground);
       frame.position.x = wx(gx);
       enableShadows(frame, true, false);   // posts and bar drop shadows on the grass
       g3.scene.add(frame);
@@ -4895,10 +5413,11 @@
     g3.ball.castShadow = true;
     g3.scene.add(g3.ball);
 
-    // a blob on the grass under the ball, so height stays readable
+    // a soft blob on the grass under the ball, so height stays readable: it
+    // was a hard black coin that only shrank, never softened, as the ball rose
     g3.ballShadow = new THREE.Mesh(
-      new THREE.CircleGeometry(ball.radius * S3, 16),
-      new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.32 })
+      new THREE.PlaneGeometry(ball.radius * S3 * 2.6, ball.radius * S3 * 2.6),
+      new THREE.MeshBasicMaterial({ map: g3.softShadow, transparent: true, opacity: 0.4, depthWrite: false })
     );
     g3.ballShadow.rotation.x = -Math.PI / 2;
     g3.scene.add(g3.ballShadow);
@@ -4937,21 +5456,41 @@
   function draw3d(dt){
     if(!g3.ready) return;
 
+    // The match camera keeps tracking the ball even while the intro or the
+    // replay own the view, so the hand-back starts from the right place
+    // instead of cutting to wherever it was frozen.
+    const bsp = Math.hypot(ball.vx, ball.vy);
+    {
+      // a medium-high angle that drifts with the play instead of following it
+      // tightly, leading the ball a little along its travel
+      const lead = 9;
+      const tx = (wx(ball.x) + ball.vx * S3 * lead) * 0.45;
+      const tz = (wz(ball.y) + ball.vy * S3 * lead) * 0.30;
+      const k = Math.min(1, dt * 2.4);
+      g3.camX += (tx - g3.camX) * k;
+      g3.camZ += (tz - g3.camZ) * k;
+      // and it rises a touch when the ball is really moving
+      const wantH = 62 + Math.min(bsp, 22) * 0.45;
+      if(g3.camH === undefined) g3.camH = 62;
+      g3.camH += (wantH - g3.camH) * Math.min(1, dt * 1.1);
+    }
+
     if(intro.active){
       introCamera();
     } else if(replay.active){
       replayCamera(dt);
     } else {
-    restoreMatchCamera();
-    // camera: a medium-high angle that drifts with the play instead of
-    // following it tightly, so you keep your bearings
-    const tx = wx(ball.x) * 0.45;
-    const tz = wz(ball.y) * 0.30;
-    const k = Math.min(1, dt * 2.4);
-    g3.camX += (tx - g3.camX) * k;
-    g3.camZ += (tz - g3.camZ) * k;
-    g3.camera.position.set(g3.camX, 62, g3.camZ + 58);
-    g3.camera.lookAt(g3.camX * 0.6, 0, g3.camZ - 4);
+      restoreMatchCamera(dt);
+      g3.camera.position.set(g3.camX, g3.camH, g3.camZ + 58);
+      g3.camera.lookAt(g3.camX * 0.6, 0, g3.camZ - 4);
+      // the impact shake moves the CAMERA here; the 2D overlay barely moves.
+      // Before, the world stood rock still on a goal while the text jittered.
+      if(shake > 0.4 && !REDUCE_MOTION){
+        const s = shake * 0.03;
+        g3.camera.position.x += (Math.random() - 0.5) * s;
+        g3.camera.position.y += (Math.random() - 0.5) * s;
+        g3.camera.rotateZ((Math.random() - 0.5) * 0.0016 * shake);
+      }
     }
 
     for(const it of g3.players){
@@ -4962,10 +5501,25 @@
 
       const down  = p.downTimer > 0;
       const slide = p.slideTimer > 0;
-      // lie him down for a slide or while he is on the floor
-      m.rotation.x = (down || slide) ? -Math.PI / 2.4 : 0;
-      ud.ring.visible = (p.role !== 'GK') &&
-                        (teamOf(p).outfield[teamOf(p).controlledIndex] === p);
+      // a run cycle: legs swing, body bobs. The 2D view advanced runPhase in
+      // its own draw; in 3D nobody did, so fourteen capsules glided about.
+      const speed = Math.hypot(p.vx, p.vy);
+      p.runPhase += speed * 0.09 * dt * 60;
+      const swing = Math.sin(p.runPhase) * Math.min(speed, 5) * 0.16;
+      if(ud.legL){ ud.legL.rotation.x = swing; ud.legR.rotation.x = -swing; }
+      const rig = ud.rig || m;
+      rig.position.y = (down || slide) ? 0 : Math.abs(Math.sin(p.runPhase)) * Math.min(speed, 5) * 0.03 * ud.base;
+      // lie him down for a slide or while he is on the floor — about HIS own
+      // axis, now that the tilt is on the rig and under the yaw
+      let lean = (down || slide) ? -Math.PI / 2.4 : 0;
+      // winding up a shot: he leans back and cocks the kicking leg
+      const tm = teamOf(p);
+      if(!lean && tm.outfield[tm.controlledIndex] === p && tm.charge > 0.02){
+        lean = -tm.charge * 0.22;
+        if(ud.legR) ud.legR.rotation.x = -tm.charge * 0.9;
+      }
+      rig.rotation.x = lean;
+      ud.ring.visible = (p.role !== 'GK') && (tm.outfield[tm.controlledIndex] === p);
       const beaten = p.role === 'GK' && p.beatenTimer > 0;
       ud.body.material.opacity = beaten ? 0.3 : 1;
       ud.body.material.transparent = beaten;
@@ -4973,10 +5527,16 @@
 
     const bz = Math.max(0, ball.z) * S3;
     g3.ball.position.set(wx(ball.x), bz + ball.radius * S3, wz(ball.y));
-    g3.ball.rotation.x += Math.hypot(ball.vx, ball.vy) * 0.05;
+    // roll about the axis perpendicular to travel: it used to spin about world
+    // X regardless, so a shot down the pitch turned sideways like a top
+    if(bsp > 0.01 && g3.axis){
+      g3.axis.set(ball.vy, 0, -ball.vx).normalize();
+      g3.ball.rotateOnWorldAxis(g3.axis, bsp * dt * 60 / ball.radius);
+    }
     g3.ballShadow.position.set(wx(ball.x), 0.04, wz(ball.y));
-    const shrink = 1 - Math.min(ball.z / 90, 1) * 0.5;
-    g3.ballShadow.scale.setScalar(Math.max(0.3, shrink));
+    const up = Math.min(ball.z / 110, 1);
+    g3.ballShadow.scale.setScalar(Math.max(0.35, 1 - up * 0.45));
+    g3.ballShadow.material.opacity = 0.4 * (1 - up * 0.6);   // fainter the higher it is
 
     const now = performance.now();
     for(const n of g3.nets3d) updateNet3d(n);
@@ -4986,6 +5546,7 @@
     updateContainMarks();
     updatePowerOrb();
     updateFireRings();
+    updateGroundBits();
     updateCheerBits(dt);
     if(g3.flags) for(const fl of g3.flags) updateFlag(fl, dt, now);
 
@@ -5012,7 +5573,7 @@
 
   function endMatch(){
     running = false;
-    sfx.whistle();
+    sfx.whistle('full');
     const winner = score1 === score2 ? null : (score1 > score2 ? team1 : team2);
     flashStatus(winner ? '¡Gana el equipo ' + winner.name + '!' : '¡Empate!');
     celebration = {
@@ -5025,22 +5586,166 @@
       duration: 5.0
     };
     shake = Math.max(shake, 14);
-    setTimeout(showEndOverlay, 5200);
+    endPending = true;
+    endTimer = setTimeout(showEndOverlay, 5200);
+  }
+  let endTimer = null, endPending = false;
+  // any key or button cuts the final confetti short
+  function skipEnding(){
+    if(!endPending) return false;
+    clearTimeout(endTimer);
+    showEndOverlay();
+    return true;
   }
 
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+  // The result card. The old end screen was one line — "AZUL 3 — 1 ROJO" —
+  // dropped on top of the full controls table. Everything here was already
+  // being counted somewhere; it just never reached the player.
   function showEndOverlay(){
-    finalScoreEl.style.display = 'block';
-    finalScoreEl.textContent = 'AZUL ' + score1 + '  —  ' + score2 + ' ROJO';
-    startBtn.textContent = 'Jugar otra vez';
-    overlay.classList.remove('hidden');
-    uiRow = uiRows().length - 1; uiCol = 0; uiPaint();   // cursor on 'Jugar otra vez'
-  }
+    endPending = false;
+    const winner = score1 === score2 ? null : (score1 > score2 ? team1 : team2);
+    const total = possession[0] + possession[1] || 1;
+    const p1 = Math.round(possession[0] / total * 100);
 
+    // player of the match: most goals (own goals do not count), then the busiest keeper
+    const tally = {};
+    for(const g of stats.goals){ if(g.own || !g.who) continue; tally[g.who] = (tally[g.who] || 0) + 1; }
+    let mvp = null, mvpN = 0;
+    for(const k in tally) if(tally[k] > mvpN){ mvp = k; mvpN = tally[k]; }
+    let mvpLine = '';
+    if(mvp){
+      mvpLine = '🏅 Jugador del partido: <b>' + esc(mvp) + '</b> (' + mvpN + (mvpN === 1 ? ' gol' : ' goles') + ')';
+    } else {
+      const s1 = stats.saves[0], s2 = stats.saves[1];
+      if(s1 + s2 > 0){
+        const gk = s1 >= s2 ? team1.gk : team2.gk;
+        mvpLine = '🧤 Jugador del partido: <b>' + esc(gk.name || 'el arquero') + '</b> (' + Math.max(s1, s2) + ' atajadas)';
+      }
+    }
+    const goalList = stats.goals.map(g =>
+      '<span style="color:' + g.team.color + '">●</span> ' + esc(g.who || g.team.name) +
+      (g.own ? ' (p.p.)' : '') + " " + g.minute + "'").join(' &nbsp;·&nbsp; ');
+
+    const row = (k, a, b) => '<tr><td>' + a + '</td><td class="k">' + k + '</td><td>' + b + '</td></tr>';
+    finalScoreEl.innerHTML =
+      '<div class="res-line"><span class="n1">' + score1 + '</span><span class="dash">—</span><span class="n2">' + score2 + '</span></div>' +
+      '<div class="res-teams"><span class="res-team">' + esc(team1.name) + '</span><span class="res-team">' + esc(team2.name) + '</span></div>' +
+      '<div class="res-winner">' + (winner ? '¡Gana ' + esc(winner.name) + '!' : 'Empate') + '</div>' +
+      '<div class="res-poss" title="Posesión"><i style="width:' + p1 + '%"></i></div>' +
+      '<table class="res-stats">' +
+        row('Posesión', p1 + '%', (100 - p1) + '%') +
+        row('Tiros', stats.shots[0], stats.shots[1]) +
+        row('A puerta', stats.onTarget[0], stats.onTarget[1]) +
+        row('Atajadas', stats.saves[0], stats.saves[1]) +
+        row('Robos', stats.steals[0], stats.steals[1]) +
+        row('Al palo', stats.posts[0], stats.posts[1]) +
+      '</table>' +
+      (mvpLine ? '<div class="res-mvp">' + mvpLine + '</div>' : '') +
+      (goalList ? '<div class="res-goals">' + goalList + '</div>' : '');
+    finalScoreEl.hidden = false;
+    finalScoreEl.style.display = '';
+    overlay.classList.add('result');
+    startBtn.textContent = '↺ Revancha';
+    if(settingsBtn) settingsBtn.hidden = false;
+    overlay.classList.remove('hidden');
+    uiRow = 0; uiCol = 0; uiPaint();   // cursor on "Revancha"
+  }
+  if(settingsBtn) settingsBtn.addEventListener('click', () => {
+    // back to the full menu, keeping the card visible above it
+    overlay.classList.remove('result');
+    settingsBtn.hidden = true;
+    startBtn.textContent = 'Empezar partido';
+    uiRow = 0; uiCol = 0; uiPaint();
+  });
+
+  /* ---- pause: a menu, not a veil ----
+     Once a match had started there was no way to restart, change view, mute
+     or get back to the menu without reloading the page. */
   function togglePause(){
     if(!running) return;
     paused = !paused;
     pauseBtn.textContent = paused ? '▶' : '⏸';
     statusEl.textContent = paused ? 'Pausa' : '';
+    if(pauseMenu){
+      pauseMenu.hidden = !paused;
+      if(paused){
+        refreshPauseLabels();
+        uiRow = 0; uiCol = 0; uiPaint();
+      } else {
+        lastTs = null;          // do not integrate the time we were away
+        uiPaint();
+      }
+    }
+  }
+  function refreshPauseLabels(){
+    if(pauseViewBtn){
+      pauseViewBtn.textContent = view3d ? '▦ Vista: cambiar a 2D' : '🎥 Vista: cambiar a 3D';
+      pauseViewBtn.disabled = !has3d();
+    }
+    if(pauseSoundBtn) pauseSoundBtn.textContent = soundOn ? '🔊 Sonido: activado' : '🔇 Sonido: silenciado';
+  }
+  function goToMenu(){
+    running = false; paused = false;
+    pauseBtn.textContent = '⏸';
+    if(pauseMenu) pauseMenu.hidden = true;
+    celebration = null; replay.active = false; intro.active = false;
+    goalAction = 0; pendingGoal = null;
+    overlay.classList.remove('hidden', 'result');
+    finalScoreEl.hidden = true;
+    if(settingsBtn) settingsBtn.hidden = true;
+    startBtn.textContent = 'Empezar partido';
+    restoreMatchCamera();
+    uiRow = 0; uiCol = 0; uiPaint();
+  }
+  if(pauseMenu) pauseMenu.addEventListener('click', e => {
+    const btn = e.target && e.target.closest ? e.target.closest('button') : null;
+    if(!btn) return;
+    const act = btn.dataset.act;
+    if(act === 'resume')  togglePause();
+    else if(act === 'restart'){ togglePause(); startMatch(); }
+    else if(act === 'view'){
+      if(!has3d()) return;
+      setView(!view3d);
+      const b = viewSeg && viewSeg.querySelector('[data-view="' + (view3d ? '3d' : '2d') + '"]');
+      if(b && viewSeg) pickSeg(viewSeg, b);
+      saveSettings();
+      refreshPauseLabels();
+    }
+    else if(act === 'sound'){ ensureAudio(); toggleMute(); refreshPauseLabels(); }
+    else if(act === 'menu'){ goToMenu(); }
+  });
+
+  // Losing the tab should not keep the clock running, nor the crowd droning
+  // out of a background tab: the Web Audio graph is not tied to rAF.
+  if(document.addEventListener) document.addEventListener('visibilitychange', () => {
+    if(document.hidden){
+      if(running && !paused) togglePause();
+      if(master && audioCtx) master.gain.setTargetAtTime(0, audioCtx.currentTime, 0.05);
+    } else {
+      lastTs = null;
+      if(master && audioCtx) master.gain.setTargetAtTime(soundOn ? 1 : 0, audioCtx.currentTime, 0.08);
+    }
+  });
+  // a pad dropping out mid-attack left your man standing there with no explanation
+  window.addEventListener('gamepaddisconnected', () => {
+    if(running && !paused){ togglePause(); flashStatus('Mando desconectado', 'play'); }
+  });
+
+  // fullscreen: F11 is fine on a desktop; laptops with touch and tablets need a button
+  if(fsBtn) fsBtn.addEventListener('click', () => {
+    const el = document.getElementById('app') || document.documentElement;
+    const isFs = document.fullscreenElement || document.webkitFullscreenElement;
+    if(isFs) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    else if(el.requestFullscreen || el.webkitRequestFullscreen)
+      (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+  });
+  // a phone cannot play this, and it should say so instead of showing a match
+  // that plays itself
+  if(mobileNote && window.matchMedia && window.matchMedia('(pointer:coarse)').matches &&
+     !window.matchMedia('(pointer:fine)').matches){
+    mobileNote.hidden = false;
   }
   pauseBtn.addEventListener('click', togglePause);
 
@@ -5101,11 +5806,13 @@
   }
 
   let hudTimer = 0;
+  let overlayDirty = true;   // the 2D overlay has something on it that needs clearing
   function gameLoop(ts){
     if(!lastTs) lastTs = ts;
     const dt = Math.min((ts - lastTs) / 1000, 0.05);
     lastTs = ts;
 
+    dropPadSnapshot();
     pollUiPad();   // menu, mute and skips: works whether or not the match ticks
 
     if(running && !paused && intro.active){
@@ -5123,27 +5830,40 @@
 
     // ---- render ----
     ctx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
+    if(REDUCE_MOTION) shake = 0;
     if(shake > 0){
-      shake *= 0.9;
+      shake *= Math.pow(0.9, dt * 60);     // decays per second, not per frame
       if(shake < 0.4) shake = 0;
-      ctx.translate((Math.random()-0.5) * shake, (Math.random()-0.5) * shake);
+      // in 3D the camera itself shakes (draw3d); the overlay only follows a little
+      const k = view3d ? 0.3 : 1;
+      ctx.translate((Math.random()-0.5) * shake * k, (Math.random()-0.5) * shake * k);
     }
 
-    if(!fieldCache || fieldCacheKey !== canvas.width + 'x' + canvas.height){
+    if(!fieldCache || fieldCacheW !== canvas.width || fieldCacheH !== canvas.height){
       buildFieldCache();
       if(g3.pitchTex) g3.pitchTex.needsUpdate = true;
     }
 
     if(view3d){
-      // three.js draws the match; the 2D canvas stays on top for the overlays
+      // three.js draws the match; the 2D canvas stays on top for the overlays.
+      // Most frames there is nothing to overlay, and clearing + compositing a
+      // full-size transparent canvas for nothing was 20-40% of the frame on a
+      // hidpi laptop — so it is only touched when something is actually on it.
       draw3d(dt);
-      ctx.clearRect(0, 0, W, H);
-      drawKickoffCountdown();
-      drawCelebration(paused ? 0 : dt);
-      if(celebration && celebration.big) drawParticles();   // final confetti
-      if(replay.active) drawReplayFrame();
-      if(intro.active) drawIntroFrame();
-      if(paused) drawPauseVeil();
+      const needs2d = kickoffTimer > 0 || celebration || replay.active || intro.active ||
+                      paused || shake > 0;
+      if(needs2d || overlayDirty){
+        ctx.clearRect(0, 0, W, H);
+        overlayDirty = !!needs2d;
+      }
+      if(needs2d){
+        drawKickoffCountdown();
+        drawCelebration(paused ? 0 : dt);
+        if(celebration && celebration.big) drawParticles();   // final confetti
+        if(replay.active) drawReplayFrame();
+        if(intro.active) drawIntroFrame();
+        if(paused) drawPauseVeil();
+      }
     } else {
       ctx.drawImage(fieldCache, 0, 0, W, H);
       drawGoals();
@@ -5171,15 +5891,18 @@
       const btn = e.target.closest('button');
       if(!btn) return;
       const want3d = btn.dataset.view === '3d';
-      if(want3d && !has3d()){
-        // three.js did not load: say so instead of silently doing nothing
-        flashStatus('La vista 3D no está disponible (no cargó three.js)');
-        return;
-      }
-      viewSeg.querySelectorAll('button').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
+      if(want3d && !has3d()) return;   // the button is disabled below; belt and braces
+      pickSeg(viewSeg, btn);
       setView(want3d);
+      saveSettings();
     });
+    // three.js did not load (offline, CDN blocked): say so ON the button. The
+    // old status-line message was written underneath the menu, where nobody
+    // could see it, so pressing 3D appeared to do nothing at all.
+    if(!has3d()){
+      const b3 = viewSeg.querySelector('[data-view="3d"]');
+      if(b3){ b3.disabled = true; b3.textContent = '🎥 3D — sin conexión'; b3.title = 'El modo 3D necesita descargar three.js. El 2D funciona siempre.'; }
+    }
   }
 
   // ---- who is player 2: a friend on the couch, or the machine ----
@@ -5196,16 +5919,57 @@
     if(p2Col)  p2Col.style.display = cpuMode ? 'none' : '';
     if(crest2) crest2.textContent = cpuMode ? 'CPU' : 'ROJ';
     if(name2)  name2.textContent  = cpuMode ? ('Máquina · ' + CPU_LEVELS[cpuLevel].name) : 'Jugador 2';
+    // the HUD said "Máquina" but every message still said "equipo Rojo"
+    team2.name = cpuMode ? 'Máquina' : 'Rojo';
     team2.cpu = cpuMode ? makeCpuState() : null;
     updatePadChips();
+    saveSettings();
+  }
+
+  // Segments: mark the picked button for the eyes, for assistive tech and for
+  // the pad cursor — a mouse click used to leave the arrow cursor wherever it
+  // was, so the next arrow press jumped somewhere arbitrary.
+  function pickSeg(seg, btn){
+    seg.querySelectorAll('button').forEach(b => {
+      b.classList.toggle('active', b === btn);
+      b.setAttribute('aria-pressed', b === btn ? 'true' : 'false');
+    });
+    uiSyncTo(btn);
+  }
+
+  /* ---- settings that survive a reload ----
+     View, rival, difficulty, length and mute. A couch game gets replayed a
+     lot; reconfiguring four segments every time the tab opens is friction
+     nobody asked for. Private windows and file:// may refuse storage, hence
+     the try/catch — the game must not care. */
+  const SETTINGS_KEY = 'fa27.settings.v1';
+  let settingsReady = false;
+  function saveSettings(){
+    if(!settingsReady) return;
+    try{
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(
+        { v: view3d, m: cpuMode, l: cpuLevel, d: matchLength, s: soundOn }));
+    }catch(e){}
+  }
+  function loadSettings(){
+    let s = null;
+    try{ s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || 'null'); }catch(e){}
+    if(s){
+      const click = sel => { const b = document.querySelector(sel); if(b && b.click) b.click(); };
+      if(s.d)          click('#len-seg [data-len="' + s.d + '"]');
+      if(s.m)          click('#mode-seg [data-mode="cpu"]');
+      if(s.l != null)  click('#level-seg [data-level="' + s.l + '"]');
+      if(s.v && has3d()) click('#view-seg [data-view="3d"]');
+      if(s.s === false && soundOn) toggleMute();
+    }
+    settingsReady = true;
   }
 
   if(modeSeg){
     modeSeg.addEventListener('click', e => {
       const btn = e.target.closest('button');
       if(!btn) return;
-      modeSeg.querySelectorAll('button').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
+      pickSeg(modeSeg, btn);
       cpuMode = btn.dataset.mode === 'cpu';
       applyMode();
     });
@@ -5215,8 +5979,7 @@
     levelSeg.addEventListener('click', e => {
       const btn = e.target.closest('button');
       if(!btn) return;
-      levelSeg.querySelectorAll('button').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
+      pickSeg(levelSeg, btn);
       cpuLevel = parseInt(btn.dataset.level, 10);
       applyMode();
     });
@@ -5225,15 +5988,24 @@
   lenSeg.addEventListener('click', e => {
     const btn = e.target.closest('button');
     if(!btn) return;
-    lenSeg.querySelectorAll('button').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
+    pickSeg(lenSeg, btn);
     matchLength = parseInt(btn.dataset.len, 10);
+    saveSettings();
   });
 
-  startBtn.addEventListener('click', () => {
+  startBtn.addEventListener('click', startMatch);
+  function startMatch(){
     ensureAudio();
+    if(endPending){ clearTimeout(endTimer); endPending = false; }
     overlay.classList.add('hidden');
-    finalScoreEl.style.display = 'none';
+    overlay.classList.remove('result');
+    finalScoreEl.hidden = true;
+    if(settingsBtn) settingsBtn.hidden = true;
+    if(pauseMenu) pauseMenu.hidden = true;
+    startBtn.textContent = 'Empezar partido';
+    resetStats();
+    restartTeam = null;
+    statusPrio = -1;
     // Enter or Space started the match from the menu, and that same press is
     // still held — without this it reads as "charge a shot" on the first frame.
     for(const k in keys) keys[k] = false;
@@ -5259,11 +6031,17 @@
     startAmbience();
     startIntro();
     if(!intro.active) sfx.whistle();
-  });
+  }
 
-  uiPaint();
   assignHair();
   assignNames();
   applyMode();
+  loadSettings();
+  uiPaint();
+  // installable + playable offline (2D always; 3D once three.js has been cached)
+  if(typeof navigator !== 'undefined' && navigator.serviceWorker && typeof location !== 'undefined' &&
+     String(location.protocol).startsWith('http')){
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
   requestAnimationFrame(gameLoop);
 })();

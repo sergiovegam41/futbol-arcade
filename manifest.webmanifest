@@ -1,0 +1,15 @@
+{
+  "name": "Fútbol Arcade",
+  "short_name": "Fútbol",
+  "description": "Fútbol arcade 7 contra 7 en el navegador: mandos o teclado, contra un amigo o la máquina, en 2D o 3D.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#07120c",
+  "theme_color": "#0d1d14",
+  "lang": "es",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

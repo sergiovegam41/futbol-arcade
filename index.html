@@ -2,8 +2,15 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
 <title>Fútbol Arcade — 2 Jugadores</title>
+<meta name="description" content="Fútbol arcade 7 contra 7 en el navegador: dos mandos o teclado, contra un amigo o la máquina, en 2D o 3D. Sin instalar nada.">
+<meta name="theme-color" content="#0d1d14">
+<meta property="og:title" content="⚽ Fútbol Arcade">
+<meta property="og:description" content="Fútbol arcade en el navegador: mandos o teclado, contra un amigo o la máquina, en 2D o 3D.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚽</text></svg>">
+<link rel="manifest" href="manifest.webmanifest">
 <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
@@ -33,8 +40,9 @@
       </div>
       <div class="crest">ROJ</div>
       <div class="hud-btns">
-        <button class="icon-btn" id="sound-btn" title="Sonido">🔊</button>
-        <button class="icon-btn" id="pause-btn" title="Pausa (P)">⏸</button>
+        <button class="icon-btn" id="sound-btn" title="Sonido" aria-label="Silenciar">🔊</button>
+        <button class="icon-btn" id="fs-btn" title="Pantalla completa" aria-label="Pantalla completa">⛶</button>
+        <button class="icon-btn" id="pause-btn" title="Pausa (P)" aria-label="Pausa">⏸</button>
       </div>
     </div>
   </div>
@@ -54,13 +62,26 @@
 
 <div id="overlay">
   <h1>⚽ Fútbol Arcade</h1>
-  <div id="final-score" style="display:none"></div>
+
+  <!-- the result card: filled in by endMatch, hidden the rest of the time -->
+  <div id="final-score" hidden></div>
+
   <p class="tagline">
-    <strong>5 contra 5</strong>: arquero + <strong>2 defensas</strong> y <strong>2 delanteros</strong> por equipo.
-    Juega contra <strong>un amigo</strong> o contra <strong>la máquina</strong> en tres niveles. Controlas a uno a la vez y el resto juega solo — <strong>si tú corres, todo el equipo corre contigo</strong>. El <strong>control siempre va a quien tiene el balón</strong>, y lo lleva pegado al pie sin que se le escape. Con <strong>B</strong> cargas un tiro fuerte, manteniendo <strong>Y</strong> encaras al rival, y con <strong>X</strong> sin balón te tiras a barrer — pero quedas en el suelo un rato.
-    Mantén el disparo para cargar un tiro potente y usa el pase para combinar.
+    <strong>7 contra 7.</strong> Controlas a un jugador a la vez; el resto se mueve solo y
+    <strong>el control salta siempre a quien tiene el balón</strong>. Mantén el tiro para cargarlo.
+    Juega contra un amigo o contra la máquina, en 2D o en 3D.
   </p>
 
+  <div class="essentials" aria-label="Controles básicos">
+    <div class="chip"><span class="chip-k">Mover</span><kbd>WASD</kbd> / palanca</div>
+    <div class="chip"><span class="chip-k">Tirar</span><kbd>Espacio</kbd> / <kbd>A</kbd> · mantén</div>
+    <div class="chip"><span class="chip-k">Tiro fuerte</span><kbd>F</kbd> / <kbd>B</kbd></div>
+    <div class="chip"><span class="chip-k">Pasar</span><kbd>E</kbd> / <kbd>X</kbd></div>
+    <div class="chip"><span class="chip-k">Robar</span><kbd>R</kbd> / <kbd>Y</kbd></div>
+  </div>
+
+  <details class="all-controls">
+    <summary>Ver todos los controles</summary>
   <div class="controls-grid">
     <div class="controls-col p1">
       <h3>Jugador Azul</h3>
@@ -99,6 +120,7 @@
       </dl>
     </div>
   </div>
+  </details>
 
   <div class="option-row">
     <span class="option-label">Vista</span>
@@ -134,11 +156,34 @@
     </div>
   </div>
 
-  <button id="start-btn">Empezar partido</button>
-  <div id="footer-note">Los navegadores detectan los mandos solo después de que presiones un botón en cada uno. Pausa con <kbd>P</kbd> o <kbd>Esc</kbd>. Muévete por este menú con las <kbd>flechas</kbd> o la <kbd>cruceta</kbd> y confirma con <kbd>Enter</kbd> o <kbd>A</kbd>. Silencia con <kbd>N</kbd> o <kbd>Back</kbd>.</div>
+
+  <div id="mobile-note" hidden>📱 Este juego necesita <strong>teclado o mando</strong>. Ábrelo en un ordenador, o conecta un mando por Bluetooth.</div>
+
+  <div class="start-row">
+    <button id="start-btn">Empezar partido</button>
+    <button id="settings-btn" class="ghost-btn" hidden>Cambiar ajustes</button>
+  </div>
+  <div id="footer-note">Los navegadores detectan los mandos solo después de que presiones un botón en cada uno. Pausa con <kbd>P</kbd>, <kbd>Esc</kbd> o <kbd>Start</kbd>. Muévete por este menú con las <kbd>flechas</kbd> o la <kbd>cruceta</kbd> y confirma con <kbd>Enter</kbd> o <kbd>A</kbd>. Silencia con <kbd>N</kbd> o <kbd>Back</kbd>.</div>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="js/game.js"></script>
+<!-- pause: a real menu, not a veil -->
+<div id="pause-menu" hidden>
+  <div class="pause-card">
+    <h2>Pausa</h2>
+    <button class="pause-item" data-act="resume">▶ Reanudar <small>P · Esc · Start</small></button>
+    <button class="pause-item" data-act="restart">↺ Reiniciar partido</button>
+    <button class="pause-item" data-act="view" id="pause-view">🎥 Vista: 3D</button>
+    <button class="pause-item" data-act="sound" id="pause-sound">🔊 Sonido: activado</button>
+    <button class="pause-item" data-act="menu">⌂ Volver al menú</button>
+    <div class="pause-help">
+      <div><kbd>WASD</kbd>/<kbd>↑←↓→</kbd> mover · <kbd>Espacio</kbd>/<kbd>Enter</kbd> tirar · <kbd>F</kbd>/<kbd>/</kbd> fuerte · <kbd>E</kbd>/<kbd>.</kbd> pasar</div>
+      <div><kbd>R</kbd>/<kbd>,</kbd> robar · <kbd>Shift</kbd>/<kbd>Ctrl</kbd> correr · <kbd>Q</kbd>/<kbd>M</kbd> cambiar · <kbd>N</kbd> silencio</div>
+      <div class="pad-line">Mando: <kbd>A</kbd> tiro · <kbd>B</kbd> fuerte · <kbd>X</kbd> pase/barrida · <kbd>Y</kbd> robar · <kbd>RT</kbd> correr · <kbd>RB</kbd> efecto · <kbd>LB</kbd> cambiar</div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" crossorigin="anonymous" defer onerror="window.__no3d=true"></script>
+<script src="js/game.js" defer></script>
 </body>
 </html>

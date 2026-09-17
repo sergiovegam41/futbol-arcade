@@ -80,6 +80,46 @@ Esto arregla dos bugs que se notaban en el mando. El primero: saltar la celebrac
 - **Balón texturizado** en 3D, con sus paneles, que rueda de verdad, y con **cola de cometa** cuando va lanzado o por el aire: dieciséis fantasmas que se afinan y se apagan hacia atrás, siguiendo por dónde pasó de verdad, así que un tiro con rosca deja una estela curva. En un tiro de fuego arde de blanco a naranja.
 - **El encare se ve en la cancha:** un arco rojo bajo el jugador, abierto hacia el balón, mientras mantienes el botón.
 
+## Ronda de pulido
+
+Cuatro auditorías en paralelo (visual 3D, jugabilidad e IA, UX y flujo de partido, rendimiento y audio) y una tanda de cambios a partir de ellas. Lo que se siente en el mando:
+
+- **Stick analógico de verdad.** La zona muerta era por eje —cualquier componente pequeña cerca de una cardinal se anulaba y el stick se sentía "de 8 direcciones"— y la magnitud se descartaba. Ahora es radial, y **cuánto empujas es cuánto corres**: del 45% al 100% de la velocidad. El teclado y la cruceta siguen a tope.
+- **Se acabó el scrum.** Dos rivales sobre el mismo balón se lo quitaban 60 veces por segundo: cada imán de conducción lo arrastraba 30 px de vuelta y el anillo parpadeaba en los dos mandos. Ahora **un balón en los pies es de quien lo lleva** — rozarlo no lo quita — y para robarlo hay que **encarar (Y)** o **barrer (X)**. Un balón suelto (un pase, un rebote, un toque largo) es de cualquiera. Tras un robo el balón queda protegido medio segundo, así que no te lo devuelven en el acto. Los defensas de la IA hacen lo mismo que un humano: cierran al que la lleva y, tras 0,75 s de presión, se la quitan — una ventana para soltarla.
+- **Encarar ya no es un turbo.** Sumaba un 12% de velocidad *encima* del sprint y, con el balón, dejaba driblar de lado con la orientación bloqueada. Ahora es una alternativa (como el impulso) y se ignora mientras eres tú quien la lleva.
+- **Tu compañero ya no patea por ti.** El que interceptaba el balón te daba el control y **disparaba en ese mismo frame** ("la agarré y la mandó a cualquier lado"). Ahora te la deja en los pies — salvo si la recibe frente al arco (a menos de 380 px), donde remata de primera, que es el único taponazo que sí quieres que dé.
+- **Los delanteros entran al área.** La forma de equipo tenía un tope matemático (un delantero izquierdo nunca pasaba de x≈1193 contra un área que empieza en 1404): no había a quién centrar. En ataque van al área, uno a cada palo, y los medios se ofrecen en corto para el pase atrás.
+- **Pases adelantados.** Iban al pie: a un receptor en carrera le caían ~110 px atrás. Ahora se apunta a donde va a estar.
+- **Saca el que recibió el gol**, con el balón protegido 0,7 s. Antes el saque era un choque simétrico y azaroso.
+- **La zona dulce avisa.** Un tic de sonido y un toque de vibración al entrar en la banda; otro más grave al salirse. Y **sobrecargar ya no es gratis**: pasarse de la banda baja mucho la probabilidad de que el arquero no la sujete (antes 36% contra 41% del golpeo perfecto; ahora la diferencia es real).
+- **Detalles**: la X al lado del balón de un compañero ya no es una barrida suicida; el teclado sigue vivo aunque haya un mando enchufado sin tocar.
+
+Interfaz y flujo:
+
+- **Menú de pausa de verdad** (Start, P o Esc): reanudar, reiniciar, cambiar 2D/3D, sonido, volver al menú, y el recordatorio de controles. Navegable con mando y teclado.
+- **Tarjeta de resultado**: posesión, tiros, a puerta, atajadas, robos, palos, goleadores con el minuto y el **jugador del partido**. Botón **Revancha** con la misma configuración, o **Cambiar ajustes**. El confeti final se salta con cualquier botón.
+- **Los ajustes se recuerdan** (vista, rival, dificultad, duración, silencio) en el navegador.
+- **Primer uso**: cinco chips con lo esencial y el resto de controles en un desplegable; el menú ya no se desborda en un portátil de 1366×768 (el botón de empezar quedaba fuera de pantalla).
+- El HUD ya no salta cuando aparece un mensaje, y un mensaje de gol no lo pisa un "saque del arquero" medio segundo después.
+- **Robustez**: three.js carga en diferido y, si no llega (sin conexión, CDN bloqueado), el botón 3D lo dice en vez de no hacer nada; al cambiar de pestaña el partido se pausa y el público se calla; si se desconecta un mando, pausa; botón de pantalla completa; favicon, descripción, manifest e **instalable / jugable sin conexión** (el service worker es *network-first*: un despliegue nunca queda tapado por la caché).
+
+En 3D:
+
+- **La cancha ahora recibe luz.** Era un plano de 4 vértices con material Lambert, que en r128 ilumina *por vértice*: los cuatro focos y la luz del orbe de fuego se muestreaban en cuatro puntos, o sea, nunca. Ahora tiene 48×27 segmentos (sigue siendo una sola llamada de dibujo) y el viñeteado horneado bajó para que la luz real mande.
+- **Los jugadores corren**: piernas que oscilan, un bote al andar, y se inclinan hacia atrás al cargar un tiro. La inclinación al barrer o caer vive en un "rig" propio, así que **el anillo de selección y el nombre ya no se tumban con él** — justo cuando más falta hacían.
+- **Impacto**: la cámara tiembla en los goles (antes el mundo quedaba quieto y solo temblaba el texto), y el polvo de las patadas, la barrida y el gol existe en 3D (un solo `THREE.Points` sobre las mismas partículas).
+- **Atmósfera**: cielo degradado, niebla que por fin alcanza la escena (empezaba a 150 unidades y nada estaba tan lejos), vallas publicitarias de los patrocinadores que esta liga merece (Pastos al Pesto, KK Sports, Penélope TV, Chancla Air, Don Cangrejo Seguros…), postes y largueros redondos con su estructura trasera, red más visible.
+- El balón **rueda sobre el eje correcto** (giraba sobre X del mundo, como un trompo, en un tiro a lo largo de la cancha); sombra suave que se desvanece con la altura, y una sombra de contacto bajo cada jugador. Los arqueros llevan una banda con el color de su equipo. La cámara adelanta un poco el balón, sube cuando el juego corre y vuelve suave desde la repetición en vez de cortar el FOV de 30 a 42 en un frame.
+
+Rendimiento y audio:
+
+- El público pasó de **1344 materiales únicos** a 16 compartidos; la red 3D ya no genera ~1500 arrays por frame ni se sube a la GPU cuando la tela duerme; las banderas dejaron de hacer un `indexOf` en el bucle caliente; el canvas de superposición ya no se compone a 4K cada frame cuando no hay nada que dibujar; una sola lectura de mandos por frame; el `resize` va a un frame y no reconstruye el césped decenas de veces al arrastrar la ventana.
+- **Audio**: master gain con un bus de efectos y otro de público (el mute es un fundido, no un corte; el público se agacha bajo el silbato), ataques de 6 ms (cada golpeo hacía *click*), patada = golpe de bota + cuerpo grave con variación, palo metálico con el "ooh" de la grada, barrida como raspón de césped, sonidos de menú, y **recoger el poder ya no suena a gol** — era una señal falsa.
+
+Balance medido tras la ronda (partidos de 3 min, 4 por nivel): un bot que persigue, encara y remata contra la máquina — **Fácil 2,0–0,5, Normal 1,0–1,5, Difícil 0,8–1,5**; y 3,5 goles por partido entre dos bots (antes de la ronda: 3,0–1,0 / 1,3–1,5 / 0,8–2,0 y 3,2). La escalera conserva su forma: Fácil se gana, Normal es pareja, Difícil te gana.
+
+Pendiente y propuesto (no tocado en esta ronda, para decidirlo juntos): un arquero que cubra el **ángulo** en vez de espejar tu Y (para que colocar el tiro valga más que el dado), una IA rival que no tire desde cualquier sitio ni dribble en línea recta, el **pase al hueco** (X mantenido), un regate con la palanca derecha cuando llevas el balón, y un modo **torneo al mejor de tres**.
+
 ## Modos
 
 Al empezar eliges rival: **👥 Un amigo** (dos mandos o teclado compartido) o **🤖 La máquina**, con tres niveles.
@@ -157,6 +197,8 @@ Conecta hasta dos mandos (el navegador los detecta solo después de que presione
 │   └── game.js       # motor: física, IA, entrada y render sobre canvas
 └── .nojekyll         # GitHub Pages sirve los archivos tal cual
 ```
+
+Además: `manifest.webmanifest`, `icon.svg` y `sw.js` (service worker *network-first*) para instalarlo y jugar sin conexión.
 
 ## Ejecutar en local
 
