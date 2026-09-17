@@ -318,3 +318,11 @@ button#start-btn:active{transform:translateY(0) scale(.99);}
 .pad-chip.live{box-shadow:0 0 0 3px rgba(242,193,78,.35);}
 #swap-btn{padding:8px 16px;font-size:.8rem;}
 #swap-btn[hidden]{display:none;}
+
+/* Panel de diagnostico de mandos: lo que ve el navegador, tal cual. */
+.pad-diag-wrap{width:min(720px,100%);text-align:left;}
+.pad-diag-wrap summary{cursor:pointer;color:var(--muted);font-size:.82rem;padding:6px;list-style:none;text-align:center;}
+.pad-diag-wrap summary::-webkit-details-marker{display:none;}
+.pad-diag-wrap summary:hover{color:var(--gold);}
+#pad-diag{margin:6px 0 0;padding:10px 12px;background:#08150e;border:1px solid var(--edge);border-radius:12px;font-size:.72rem;line-height:1.55;color:#dff2e2;white-space:pre-wrap;word-break:break-word;user-select:text;}
+.pad-tips{font-size:.74rem;color:var(--muted);line-height:1.6;margin-top:6px;}

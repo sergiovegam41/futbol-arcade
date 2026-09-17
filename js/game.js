@@ -1215,14 +1215,58 @@
       label(1, 'flechas');
     }
     if(swapBtn) swapBtn.hidden = slots.length < 2 || cpuMode;
+    if(padDiagEl){
+      padDiagEl.textContent = (chip1.textContent + (cpuMode ? '' : '\n' + chip2.textContent)) + '\n\n' + padDiagText();
+    }
     if(slots.length === 0 && inputMode[0] !== 'keyboard'){
       chip1.textContent += ' · el navegador solo muestra un mando tras pulsar un botón en él';
     }
   }
 
   setInterval(() => { if(uiOpen()) updatePadChips(); }, 250);
-  window.addEventListener('gamepadconnected', updatePadChips);
-  window.addEventListener('gamepaddisconnected', updatePadChips);
+  // diagnostics: how many connect/disconnect events the browser has actually
+  // delivered, and the last raw view of the list — shown in the menu so a
+  // "the game does not hear my pad" report can say what the BROWSER sees
+  const padEvents = { connected: 0, disconnected: 0, lastId: '' };
+  window.addEventListener('gamepadconnected', e => {
+    padEvents.connected++; padEvents.lastId = e && e.gamepad ? e.gamepad.id : '';
+    dropPadSnapshot(); updatePadChips();
+  });
+  window.addEventListener('gamepaddisconnected', () => { padEvents.disconnected++; dropPadSnapshot(); updatePadChips(); });
+
+  const padDiagEl = document.getElementById('pad-diag');
+  function padDiagText(){
+    const hasApi = !!(navigator.getGamepads);
+    const raw = hasApi ? (getGamepads() || []) : [];
+    const lines = [];
+    if(!hasApi){
+      lines.push('❌ Este navegador no expone la API de mandos (navigator.getGamepads).');
+    } else {
+      let n = 0;
+      for(let i = 0; i < raw.length; i++){
+        const gp = raw[i];
+        if(!gp) continue;
+        n++;
+        lines.push('• Índice ' + i + ': ' + gp.id + ' — ' + (gp.connected === false ? 'DESCONECTADO' : 'conectado') +
+                   ' · ' + (gp.buttons ? gp.buttons.length : 0) + ' botones · ' + (gp.axes ? gp.axes.length : 0) +
+                   ' ejes · mapping "' + (gp.mapping || 'no estándar') + '"');
+      }
+      if(!n) lines.push('El navegador devuelve la lista vacía: no ha entregado ningún mando a esta página.');
+    }
+    lines.push('Eventos de conexión recibidos: ' + padEvents.connected + ' · desconexión: ' + padEvents.disconnected +
+               (padEvents.lastId ? ' · último: ' + padEvents.lastId : ''));
+    let policy = '';
+    try{
+      if(document.featurePolicy && document.featurePolicy.allowsFeature)
+        policy = document.featurePolicy.allowsFeature('gamepad') ? 'permitida' : 'BLOQUEADA';
+    }catch(e){}
+    lines.push('Pestaña con foco: ' + (document.hasFocus ? (document.hasFocus() ? 'sí' : 'NO') : '?') +
+               ' · contexto seguro: ' + (window.isSecureContext ? 'sí' : 'NO') +
+               (policy ? ' · política "gamepad": ' + policy : '') +
+               (window.top !== window.self ? ' · ⚠ dentro de un iframe' : ''));
+    lines.push(navigator.userAgent);
+    return lines.join('\n');
+  }
 
   const STICK_DZ  = 0.15;   // radial deadzone
   const STICK_MAX = 0.95;   // where the stick counts as fully pushed
