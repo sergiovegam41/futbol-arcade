@@ -93,6 +93,7 @@ Cuatro auditorías en paralelo (visual 3D, jugabilidad e IA, UX y flujo de parti
 - **Saca el que recibió el gol**, con el balón protegido 0,7 s. Antes el saque era un choque simétrico y azaroso.
 - **La zona dulce avisa.** Un tic de sonido y un toque de vibración al entrar en la banda; otro más grave al salirse. Y **sobrecargar ya no es gratis**: pasarse de la banda baja mucho la probabilidad de que el arquero no la sujete (antes 36% contra 41% del golpeo perfecto; ahora la diferencia es real).
 - **Detalles**: la X al lado del balón de un compañero ya no es una barrida suicida; el teclado sigue vivo aunque haya un mando enchufado sin tocar.
+- **Mandos que "dejaban de detectarse"**: la lista del navegador tiene huecos — un mando Bluetooth que se reconecta cae en el índice 1, 2 o 3 y el que se cayó puede quedar como entrada muerta en el 0. El juego compactaba la lista para el chip ("Mando 1: conectado ✔") pero leía `getGamepads()[0]` para jugar: conectado a la vista y sordo. Ahora los mandos se asignan por jugador sobre la lista compactada de mandos vivos, y en el menú hay un selector por jugador — **Auto / Teclado / Mando** — más un botón para intercambiarlos si cada uno controla al equipo equivocado. El chip de abajo nombra el mando y se ilumina mientras recibe algo, para probarlo sin entrar al partido.
 
 Interfaz y flujo:
 

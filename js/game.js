@@ -1146,33 +1146,81 @@
     padSnap = navigator.getGamepads ? navigator.getGamepads() : [];
     return padSnap;
   }
-  function dropPadSnapshot(){ padSnap = null; }
+  function dropPadSnapshot(){ padSnap = null; padSlotsCache = null; }
+
+  /* ---- which pad belongs to which player ----
+     The browser list has HOLES. Bluetooth pads reconnect into whatever slot is
+     free, and a dropped pad can linger as a stale entry, so a single live
+     controller is often at index 1, 2 or 3 with index 0 empty or dead. The old
+     code compacted the list for the CHIPS ("Mando 1: conectado") and then read
+     getGamepads()[0] for the actual input — null — so the pad was visibly
+     connected and completely deaf. That is the "it worked and then it just
+     stopped" report: a Bluetooth reconnection moved it. Everything now goes
+     through padFor(player): the connected pads compacted in order, with an
+     optional swap and a per-player input mode. */
+  let padSlotsCache = null;
+  function padSlots(){
+    if(padSlotsCache) return padSlotsCache;
+    const list = getGamepads(), out = [];
+    for(let i = 0; i < list.length; i++){
+      const gp = list[i];
+      if(gp && gp.connected !== false && gp.buttons && gp.buttons.length) out.push(gp);
+    }
+    padSlotsCache = out;
+    return out;
+  }
+  // 'auto': pad when it is being used, keyboard otherwise. 'pad' / 'keyboard': forced.
+  const inputMode = ['auto', 'auto'];
+  let swapPads = false;
+  function padFor(player){
+    if(inputMode[player] === 'keyboard') return null;
+    const slots = padSlots();
+    const idx = swapPads ? 1 - player : player;
+    return slots[idx] || null;
+  }
+  // the last moment any input arrived from each player's pad — for the chips
+  const padSeen = [0, 0];
   function trimName(name){
     return name.length > 22 ? name.slice(0, 22) + '…' : name;
   }
   function updatePadChips(){
-    const pads = getGamepads();
-    const connected = [];
-    for(const gp of pads){ if(gp) connected.push(gp); }
-    if(connected[0]){
-      chip1.textContent = 'Mando 1: conectado ✔ (' + trimName(connected[0].id) + ')';
-      chip1.classList.add('on');
-    } else {
-      chip1.textContent = 'Mando 1: no conectado (usa WASD)';
-      chip1.classList.remove('on');
-    }
+    const slots = padSlots();
+    const now = performance.now();
+    const label = (player, keysHint) => {
+      const chip = player ? chip2 : chip1;
+      const who  = player ? 'Rojo' : 'Azul';
+      const mode = inputMode[player];
+      const gp   = padFor(player);
+      const live = now - padSeen[player] < 400;
+      chip.classList.toggle('live', live);
+      if(mode === 'keyboard'){
+        chip.textContent = who + ': teclado (' + keysHint + ')';
+        chip.classList.remove('on');
+      } else if(gp){
+        chip.textContent = who + ': mando ✔ ' + trimName(gp.id) + (live ? ' · recibiendo' : ' · pulsa un botón para probarlo');
+        chip.classList.add('on');
+      } else if(mode === 'pad'){
+        chip.textContent = who + ': esperando mando… pulsa un botón en él con esta pestaña enfocada';
+        chip.classList.remove('on');
+      } else {
+        chip.textContent = who + ': sin mando, teclado (' + keysHint + ')';
+        chip.classList.remove('on');
+      }
+    };
+    label(0, 'WASD');
     if(cpuMode){
-      chip2.textContent = '🤖 Jugador 2: la máquina';
-      chip2.classList.add('on');
-    } else if(connected[1]){
-      chip2.textContent = 'Mando 2: conectado ✔ (' + trimName(connected[1].id) + ')';
-      chip2.classList.add('on');
+      chip2.textContent = '🤖 Rojo: la máquina';
+      chip2.classList.add('on'); chip2.classList.remove('live');
     } else {
-      chip2.textContent = 'Mando 2: no conectado (usa flechas)';
-      chip2.classList.remove('on');
+      label(1, 'flechas');
+    }
+    if(swapBtn) swapBtn.hidden = slots.length < 2 || cpuMode;
+    if(slots.length === 0 && inputMode[0] !== 'keyboard'){
+      chip1.textContent += ' · el navegador solo muestra un mando tras pulsar un botón en él';
     }
   }
-  setInterval(() => { if(uiOpen()) updatePadChips(); }, 1500);
+
+  setInterval(() => { if(uiOpen()) updatePadChips(); }, 250);
   window.addEventListener('gamepadconnected', updatePadChips);
   window.addEventListener('gamepaddisconnected', updatePadChips);
 
@@ -1180,8 +1228,8 @@
   const STICK_MAX = 0.95;   // where the stick counts as fully pushed
   const WALK_MIN  = 0.45;   // fraction of top speed at the deadzone edge
 
-  function readPadInput(index){
-    const gp = getGamepads()[index];
+  function readPadInput(player){
+    const gp = padFor(player);
     if(!gp) return null;
     let dx = 0, dy = 0;
     if(gp.axes.length >= 2){
@@ -1205,6 +1253,7 @@
     const btn = i => !!(gp.buttons[i] && gp.buttons[i].pressed);
     let rsx = 0, rsy = 0;
     if(gp.axes.length >= 4){ rsx = gp.axes[2]; rsy = gp.axes[3]; }
+    if(dx || dy || gp.buttons.some(b => b && b.pressed)) padSeen[player] = performance.now();
     return {
       dx, dy,
       kick:    btn(0),                      // A  — shot (hold to charge)
@@ -1225,9 +1274,9 @@
   let rumbleOn = true;
   const clamp01 = v => Math.max(0, Math.min(1, v));
 
-  function rumble(padIndex, strong, weak, duration){
+  function rumble(player, strong, weak, duration){
     if(!rumbleOn) return false;
-    const gp = getGamepads()[padIndex];
+    const gp = padFor(player);
     if(!gp) return false;
     const ms = Math.round(duration);
     const act = gp.vibrationActuator;
@@ -1297,12 +1346,12 @@
                    ok:false, mute:false, start:false };
 
   function padUiState(){
-    const pads = getGamepads();
+    const pads = padSlots();
     const st = { any:false, up:false, down:false, left:false, right:false,
                  ok:false, mute:false, start:false };
-    for(let i = 0; i < 2; i++){
+    for(let i = 0; i < pads.length; i++){
       const gp = pads[i];
-      if(!gp) continue;
+      if(inputMode[0] === 'keyboard' && inputMode[1] === 'keyboard') break;
       const btn = n => !!(gp.buttons[n] && gp.buttons[n].pressed);
       const ax  = gp.axes.length >= 2 ? gp.axes[0] : 0;
       const ay  = gp.axes.length >= 2 ? gp.axes[1] : 0;
@@ -1343,7 +1392,7 @@
       rows.push(r);
       return rows;
     }
-    for(const id of ['view-seg', 'mode-seg', 'level-seg', 'len-seg']){
+    for(const id of ['view-seg', 'mode-seg', 'level-seg', 'len-seg', 'in1-seg', 'in2-seg']){
       const el = document.getElementById(id);
       if(!el) continue;
       const row = el.closest ? el.closest('.option-row') : null;
@@ -1788,12 +1837,18 @@
     return out;
   }
 
+  const NEUTRAL_INPUT = {dx:0, dy:0, kick:false, pass:false, sprint:false, power:false, contain:false, modifier:false, switchBtn:false, rsx:0, rsy:0};
   function getInputFor(team, dt){
     if(isCpu(team)) return cpuInput(team, dt || 1/60);
-    const pad = readPadInput(team.isP1 ? 0 : 1);
-    // A connected pad used to make the keyboard dead. Now the keyboard still
-    // works whenever the pad is idle, so a plugged-in controller nobody is
-    // holding does not lock a keyboard player out.
+    const player = team.isP1 ? 0 : 1;
+    const mode = inputMode[player];
+    const pad = readPadInput(player);
+    // forced pad: the keyboard is ignored even if the pad is missing (it would
+    // otherwise let the other player's keys leak in)
+    if(mode === 'pad') return pad || NEUTRAL_INPUT;
+    // 'auto': a connected pad used to make the keyboard dead. Now the keyboard
+    // still works whenever the pad is idle, so a plugged-in controller nobody
+    // is holding does not lock a keyboard player out.
     if(pad && (pad.dx || pad.dy || pad.kick || pad.power || pad.pass || pad.contain ||
                pad.sprint || pad.modifier || pad.switchBtn ||
                Math.abs(pad.rsx) > 0.3 || Math.abs(pad.rsy) > 0.3)) return pad;
@@ -5915,6 +5970,7 @@
 
   function applyMode(){
     if(levelRow) levelRow.hidden = !cpuMode;
+    if(in2Row) in2Row.hidden = cpuMode;
     uiPaint();
     if(p2Col)  p2Col.style.display = cpuMode ? 'none' : '';
     if(crest2) crest2.textContent = cpuMode ? 'CPU' : 'ROJ';
@@ -5948,7 +6004,8 @@
     if(!settingsReady) return;
     try{
       localStorage.setItem(SETTINGS_KEY, JSON.stringify(
-        { v: view3d, m: cpuMode, l: cpuLevel, d: matchLength, s: soundOn }));
+        { v: view3d, m: cpuMode, l: cpuLevel, d: matchLength, s: soundOn,
+          i1: inputMode[0], i2: inputMode[1], sw: swapPads }));
     }catch(e){}
   }
   function loadSettings(){
@@ -5961,6 +6018,9 @@
       if(s.l != null)  click('#level-seg [data-level="' + s.l + '"]');
       if(s.v && has3d()) click('#view-seg [data-view="3d"]');
       if(s.s === false && soundOn) toggleMute();
+      if(s.i1) click('#in1-seg [data-input="' + s.i1 + '"]');
+      if(s.i2) click('#in2-seg [data-input="' + s.i2 + '"]');
+      if(s.sw) swapPads = true;
     }
     settingsReady = true;
   }
@@ -5984,6 +6044,29 @@
       applyMode();
     });
   }
+
+  // ---- keyboard or pad, per player ----
+  const in1Seg = document.getElementById('in1-seg');
+  const in2Seg = document.getElementById('in2-seg');
+  const in2Row = document.getElementById('in2-row');
+  const swapBtn = document.getElementById('swap-btn');
+  [in1Seg, in2Seg].forEach((seg, player) => {
+    if(!seg) return;
+    seg.addEventListener('click', e => {
+      const btn = e.target.closest('button');
+      if(!btn) return;
+      pickSeg(seg, btn);
+      inputMode[player] = btn.dataset.input || 'auto';
+      updatePadChips();
+      saveSettings();
+    });
+  });
+  if(swapBtn) swapBtn.addEventListener('click', () => {
+    swapPads = !swapPads;
+    flashStatus(swapPads ? 'Mandos intercambiados' : 'Mandos en orden');
+    updatePadChips();
+    saveSettings();
+  });
 
   lenSeg.addEventListener('click', e => {
     const btn = e.target.closest('button');

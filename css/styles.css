@@ -313,3 +313,8 @@ button#start-btn:active{transform:translateY(0) scale(.99);}
   box-shadow:0 0 0 5px rgba(242,193,78,0.20);
 }
 #overlay button.ui-focus:not(.active){color:var(--gold);}
+
+/* El chip parpadea mientras el mando manda algo: la prueba de vida del mando. */
+.pad-chip.live{box-shadow:0 0 0 3px rgba(242,193,78,.35);}
+#swap-btn{padding:8px 16px;font-size:.8rem;}
+#swap-btn[hidden]{display:none;}
