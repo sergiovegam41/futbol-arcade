@@ -1230,9 +1230,41 @@
   const padEvents = { connected: 0, disconnected: 0, lastId: '' };
   window.addEventListener('gamepadconnected', e => {
     padEvents.connected++; padEvents.lastId = e && e.gamepad ? e.gamepad.id : '';
+    const gp = e && e.gamepad;
+    console.info('[FC27 mandos] CONECTADO → índice ' + (gp ? gp.index : '?') + ' · "' + (gp ? gp.id : '?') + '" · ' +
+                 (gp && gp.buttons ? gp.buttons.length : '?') + ' botones · mapping "' + (gp ? (gp.mapping || 'no estándar') : '?') + '"');
     dropPadSnapshot(); updatePadChips();
   });
-  window.addEventListener('gamepaddisconnected', () => { padEvents.disconnected++; dropPadSnapshot(); updatePadChips(); });
+  window.addEventListener('gamepaddisconnected', e => {
+    padEvents.disconnected++;
+    console.info('[FC27 mandos] DESCONECTADO → índice ' + (e && e.gamepad ? e.gamepad.index : '?'));
+    dropPadSnapshot(); updatePadChips();
+  });
+  console.info('[FC27] API de mandos: ' + (navigator.getGamepads ? 'disponible' : 'NO DISPONIBLE') +
+               ' · contexto seguro: ' + (window.isSecureContext ? 'sí' : 'no') +
+               ' · en iframe: ' + (window.top !== window.self ? 'SÍ' : 'no') +
+               '. Escribe fc27.mandos() en esta consola para ver los mandos.');
+  // console helper: a table of what the browser reports, plus live input
+  window.fc27 = window.fc27 || {};
+  window.fc27.mandos = function(){
+    dropPadSnapshot();
+    const raw = navigator.getGamepads ? navigator.getGamepads() : [];
+    const rows = [];
+    for(let i = 0; i < raw.length; i++){
+      const gp = raw[i];
+      rows.push(gp ? { indice: i, id: gp.id, conectado: gp.connected, botones: gp.buttons.length, ejes: gp.axes.length,
+                       mapping: gp.mapping || 'no estándar',
+                       pulsado: gp.buttons.map((b, k) => b.pressed ? k : -1).filter(k => k >= 0).join(',') || '-',
+                       stick: gp.axes.slice(0, 2).map(v => v.toFixed(2)).join(',') }
+                   : { indice: i, id: '(vacío)' });
+    }
+    if(!rows.length) console.warn('[FC27 mandos] la lista está VACÍA: el navegador no ha entregado ningún mando a esta página.');
+    else console.table(rows);
+    console.info('[FC27 mandos] eventos conectado=' + padEvents.connected + ' desconectado=' + padEvents.disconnected +
+                 ' · asignación: Azul → ' + (padFor(0) ? padFor(0).id : 'ninguno') + ' · Rojo → ' + (padFor(1) ? padFor(1).id : 'ninguno') +
+                 ' · modo Azul=' + inputMode[0] + ' Rojo=' + inputMode[1]);
+    return rows;
+  };
 
   const padDiagEl = document.getElementById('pad-diag');
   function padDiagText(){
